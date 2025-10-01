@@ -1,0 +1,34 @@
+# Frontend (top-level) .gitignore - general for frontend folder
+
+# Node
+node_modules/
+**/node_modules/
+
+# Next
+.next/
+out/
+
+# Environment
+.env
+.env.*
+.env.local
+
+# Logs
+npm-debug.log*
+*.log
+
+# Editor
+.vscode/
+.DS_Store
+
+# Build
+dist/
+build/
+
+# Public generated
+public/static/
+
+# Misc
+.cache/
+coverage/
+

@@ -1,0 +1,134 @@
+generator client {
+  provider = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"] // Add this line
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DIRECT_URL")
+  extensions = [vector] // Add this line
+}
+
+// prisma/schema.prisma
+
+model User {
+  id                  String    @id @default(cuid())
+  name                String
+  email               String    @unique
+  role                Role
+  
+  // Corrected and new fields
+  password            String?   // Made optional for Google OAuth users
+  verificationToken   String?   @unique
+  provider            String    @default("email")
+  providerAccountId   String?
+
+  // Timestamps and relations
+  createdAt           DateTime  @default(now())
+  emailVerified       DateTime?
+  updatedAt           DateTime  @updatedAt
+  teachingClasses     Class[]   @relation("TeacherClasses")
+
+  submissions         Submission[]
+  enrolledClasses     Class[]   @relation("UserClasses")
+  image               String?   // Kept this optional field
+  posts    Post[]
+  comments Comment[]
+}
+
+model Class {
+  id          String       @id @default(cuid())
+  title       String
+  teacherId   String
+  joinCode    String       @unique
+
+  // Add these two lines
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  assignments Assignment[]
+  teacher     User         @relation("TeacherClasses", fields: [teacherId], references: [id])
+  students    User[]       @relation("UserClasses")
+  posts    Post[]
+}
+
+model Assignment {
+  id          String       @id @default(cuid())
+  title       String
+  description String
+  deadline    DateTime
+  points      Int?         // Add this line for assignment points
+  classId     String
+  // Add these two lines
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  class       Class        @relation(fields: [classId], references: [id])
+  submissions Submission[]
+}
+
+model Submission {
+  id           String    @id @default(cuid())
+  content      String?   // Optional for file-only submissions
+  fileUrl      String?   // To store the S3 file URL
+  grade        String?   // Add this field for the grade
+  studentId    String
+  assignmentId String
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  chunks       SubmissionChunk[] // Add this relation
+  report       PlagiarismReport?
+  assignment   Assignment @relation(fields: [assignmentId], references: [id])
+  student      User       @relation(fields: [studentId], references: [id])
+}
+
+model PlagiarismReport {
+  id            String     @id @default(cuid())
+  similarity    Float
+  aiProbability Float
+  highlights    Json
+  status        ReportStatus @default(PENDING) // Add this line
+  submissionId  String     @unique
+  submission    Submission @relation(fields: [submissionId], references: [id])
+}
+model SubmissionChunk {
+  id           String    @id @default(cuid())
+  content      String    // The sentence/chunk of text
+  embedding    Unsupported("vector(384)")? // The AI-generated embedding
+  embedding_mpnet Unsupported("vector(768)")? // Add this new field
+  submissionId String
+  submission   Submission @relation(fields: [submissionId], references: [id])
+  createdAt    DateTime  @default(now())
+}
+model Post {
+  id        String    @id @default(cuid())
+  content   String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  classId   String
+  authorId  String
+  class     Class     @relation(fields: [classId], references: [id])
+  author    User      @relation(fields: [authorId], references: [id])
+  comments  Comment[]
+}
+
+model Comment {
+  id        String   @id @default(cuid())
+  content   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  postId    String
+  authorId  String
+  post      Post     @relation(fields: [postId], references: [id])
+  author    User     @relation(fields: [authorId], references: [id])
+}
+enum Role {
+  TEACHER
+  STUDENT
+}
+enum ReportStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+
