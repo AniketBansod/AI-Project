@@ -3,10 +3,10 @@ import os
 import io
 import requests
 import fitz  # PyMuPDF
-import docx
 import nltk
 import statistics
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 import psycopg2
@@ -72,6 +72,7 @@ def extract_text_from_pdf(content: bytes) -> str:
         raise
 
 def extract_text_from_docx(content: bytes) -> str:
+    import docx
     try:
         doc = docx.Document(io.BytesIO(content))
         return "\n".join([p.text for p in doc.paragraphs])
@@ -126,8 +127,12 @@ def detect_ai_probability(text: str) -> float:
 # ----------- Pydantic models -----------
 class PlagiarismRequest(BaseModel):
     submission_id: str
-    assignment_id: str          # <-- New field to filter by assignment
+    assignment_id: str
     text_content: str | None = None
+    file_url: str | None = None
+
+class HighlightRequest(BaseModel):
+    submission_id: str | None = None
     file_url: str | None = None
 
 class MatchItem(BaseModel):
@@ -139,11 +144,10 @@ class PlagiarismResponse(BaseModel):
     ai_probability: float
     matches: List[MatchItem] = []
 
-# ----------- Endpoint -----------
+# ----------- Endpoint: plagiarism check -----------
 @app.post("/check", response_model=PlagiarismResponse)
 def check_plagiarism(request: PlagiarismRequest):
     submission_text = ""
-    # Load text from file or text content
     if request.file_url:
         try:
             resp = requests.get(request.file_url, timeout=30)
@@ -163,10 +167,7 @@ def check_plagiarism(request: PlagiarismRequest):
     if not submission_text.strip():
         return PlagiarismResponse(similarity_score=0.0, ai_probability=0.0, matches=[])
 
-    # AI detection
     ai_prob = detect_ai_probability(submission_text)
-
-    # Chunk + embeddings
     chunks = chunk_text_words(submission_text)
     if not chunks:
         return PlagiarismResponse(similarity_score=0.0, ai_probability=round(ai_prob, 4), matches=[])
@@ -174,13 +175,11 @@ def check_plagiarism(request: PlagiarismRequest):
     embeddings_chunks = similarity_model.encode(chunks, convert_to_numpy=True, show_progress_bar=False)
     embedding_doc = similarity_model.encode([submission_text], convert_to_numpy=True, show_progress_bar=False)[0]
 
-    # Database similarity check (assignment-specific)
     conn = get_db_connection()
     cur = conn.cursor()
     match_best = {}
     chunk_top_means = []
 
-    # Chunk-level similarity
     for emb in embeddings_chunks:
         emb_list = emb.tolist()
         cur.execute(
@@ -200,7 +199,6 @@ def check_plagiarism(request: PlagiarismRequest):
             if sim > match_best.get(sid, 0.0):
                 match_best[sid] = sim
 
-    # Doc-level similarity
     doc_list = embedding_doc.tolist()
     cur.execute(
         'SELECT sc."submissionId", 1 - (sc.embedding_mpnet <=> %s::vector) AS similarity '
@@ -217,14 +215,12 @@ def check_plagiarism(request: PlagiarismRequest):
         if sim > match_best.get(sid, 0.0):
             match_best[sid] = sim
 
-    # Insert doc embedding
+    # Insert embeddings (doc + chunks)
     cur.execute(
         'INSERT INTO "SubmissionChunk" (id, content, embedding_mpnet, "submissionId", "createdAt") '
         'VALUES (gen_random_uuid(), %s, %s::vector, %s, NOW())',
         (submission_text, doc_list, request.submission_id)
     )
-
-    # Insert chunk embeddings
     for i, chunk in enumerate(chunks):
         emb_list = embeddings_chunks[i].tolist()
         cur.execute(
@@ -237,7 +233,6 @@ def check_plagiarism(request: PlagiarismRequest):
     cur.close()
     conn.close()
 
-    # Aggregate similarity safely
     all_match_values = [float(v) for v in match_best.values()] if match_best else [0.0]
     chunk_mean = statistics.mean(chunk_top_means) if chunk_top_means else 0.0
     final_similarity = max(all_match_values + [chunk_mean, doc_top_mean])
@@ -251,4 +246,87 @@ def check_plagiarism(request: PlagiarismRequest):
         similarity_score=round(final_similarity, 4),
         ai_probability=round(ai_prob, 4),
         matches=[MatchItem(**m) for m in top_matches]
+    )
+
+# ----------- Endpoint: highlight PDF -----------
+@app.post("/highlight_pdf")
+def highlight_pdf(request: HighlightRequest = Body(...)):
+    if not request.file_url:
+        raise HTTPException(status_code=400, detail="file_url is required")
+
+    # Fetch PDF content
+    try:
+        resp = requests.get(request.file_url, timeout=30)
+        resp.raise_for_status()
+        pdf_content = resp.content
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch PDF: {e}")
+
+    doc = fitz.open(stream=pdf_content, filetype="pdf")
+
+    # Extract words with coordinates
+    words_per_page = []
+    all_words = []
+    for page_idx, page in enumerate(doc):
+        words = page.get_text("words")
+        words.sort(key=lambda w: (w[1], w[0]))
+        words_per_page.append(words)
+        for w in words:
+            all_words.append({"page_idx": page_idx, "coords": w[:4], "text": w[4]})
+
+    full_text = " ".join([w["text"] for w in all_words])
+    sentences = nltk.sent_tokenize(full_text)
+
+    # DB connection
+    conn = get_db_connection()
+    cur = conn.cursor()
+    sentence_scores = []
+    for sentence in sentences:
+        ai_prob = detect_ai_probability(sentence)
+        # Real plagiarism: query DB
+        emb = similarity_model.encode([sentence], convert_to_numpy=True)[0].tolist()
+        cur.execute(
+            'SELECT MAX(1 - (sc.embedding_mpnet <=> %s::vector)) '
+            'FROM "SubmissionChunk" sc '
+            'WHERE sc."submissionId" != %s',
+            (emb, request.submission_id or "")
+        )
+        plag_score = cur.fetchone()[0] or 0.0
+        sentence_scores.append({"sentence": sentence, "ai_prob": ai_prob, "plag_score": plag_score})
+    cur.close()
+    conn.close()
+
+    AI_THRESHOLD = 0.5
+    PLAG_THRESHOLD = 0.6
+    word_index = 0
+    for s in sentence_scores:
+        color = None
+        if s["ai_prob"] >= AI_THRESHOLD and s["plag_score"] >= PLAG_THRESHOLD:
+            color = (0.5, 0, 0.5)  # purple
+        elif s["ai_prob"] >= AI_THRESHOLD:
+            color = (0, 0, 1)  # blue
+        elif s["plag_score"] >= PLAG_THRESHOLD:
+            color = (1, 0, 0)  # red
+
+        if color:
+            words_in_sentence = len(nltk.word_tokenize(s["sentence"]))
+            for w in all_words[word_index:word_index + words_in_sentence]:
+                page = doc[w["page_idx"]]
+                annot = page.add_highlight_annot(w["coords"])
+                annot.set_colors(stroke=color)
+                annot.update()
+            word_index += words_in_sentence
+        else:
+            word_index += len(nltk.word_tokenize(s["sentence"]))
+
+    # Save highlighted PDF
+    pdf_bytes = io.BytesIO()
+    doc.save(pdf_bytes)
+    pdf_bytes.seek(0)
+    doc.close()
+
+    return StreamingResponse(
+        pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=highlighted.pdf"}
     )

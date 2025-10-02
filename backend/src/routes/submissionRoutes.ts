@@ -4,9 +4,11 @@ import multer from "multer";
 import multerS3 from "multer-s3-v3";
 import { S3Client } from "@aws-sdk/client-s3";
 import * as submissionController from "../controllers/submissionController";
-import { authMiddleware, isStudent } from "../middleware/authMiddleware";
+import { authMiddleware, isStudent, isTeacher } from "../middleware/authMiddleware";
 
-// Configure S3 Client (v3)
+const router = Router();
+
+// Configure S3 Client (v3) - ensure env variables exist
 const s3 = new S3Client({
   region: process.env.AWS_REGION!,
   credentials: {
@@ -25,15 +27,21 @@ const upload = multer({
   }),
 });
 
-const router = Router();
-
-// POST /api/submissions/:assignmentId
+// POST /api/submissions/:assignmentId (student uploads)
 router.post(
   "/:assignmentId",
   authMiddleware,
   isStudent,
   upload.single("file"),
   submissionController.createSubmission
+);
+
+// GET /api/submissions/:submissionId/highlighted-pdf (teacher downloads highlighted PDF)
+router.get(
+  "/:submissionId/highlighted-pdf",
+  authMiddleware,
+  isTeacher,
+  submissionController.downloadHighlightedPdf
 );
 
 export default router;
