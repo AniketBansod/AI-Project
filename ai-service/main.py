@@ -1,4 +1,3 @@
-# main.py
 import os
 import io
 import requests
@@ -20,7 +19,7 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 PORT = int(os.getenv("AI_SERVICE_PORT", 8000))
 
-CHUNK_SIZE_WORDS = int(os.getenv("CHUNK_SIZE_WORDS", 300))
+CHUNK_SIZE_WORDS = int(os.getenv("CHUNK_SIZE_WORDS", 150))
 CHUNK_OVERLAP_WORDS = int(os.getenv("CHUNK_OVERLAP_WORDS", 50))
 TOP_K = int(os.getenv("TOP_K", 5))
 
@@ -283,7 +282,6 @@ def highlight_pdf(request: HighlightRequest = Body(...)):
     sentence_scores = []
     for sentence in sentences:
         ai_prob = detect_ai_probability(sentence)
-        # Real plagiarism: query DB
         emb = similarity_model.encode([sentence], convert_to_numpy=True)[0].tolist()
         cur.execute(
             'SELECT MAX(1 - (sc.embedding_mpnet <=> %s::vector)) '
