@@ -1,182 +1,154 @@
-// src/controllers/submissionController.ts
-import { Request, Response } from "express";
-import prisma from "../utils/prisma";
-import { plagiarismQueue } from "../queues/plagiarismQueue";
-import axios from "axios";
-import { Readable } from "stream";
+import { Request, Response } from 'express';
+import prisma from '../utils/prisma';
+import plagiarismQueue from '../queues/plagiarismQueue';
+import axios from 'axios';
+import { S3Client, HeadObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { Readable } from 'stream';
+import dotenv from 'dotenv';
+dotenv.config();
 
-interface MulterS3File extends Express.Multer.File {
-  location?: string;
-}
+const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://127.0.0.1:8000';
+const S3_BUCKET = process.env.AWS_S3_BUCKET_NAME;
+const s3 = new S3Client({ region: process.env.AWS_REGION || 'us-east-1' });
 
+/**
+ * Create submission (student). Expects: { content?, fileUrl?, assignmentId }
+ * - writes Submission
+ * - writes initial PlagiarismReport (PENDING)
+ * - enqueues background job
+ */
 export const createSubmission = async (req: Request, res: Response) => {
   try {
-    const { assignmentId } = req.params;
-    const { content } = req.body;
-    const studentId = (req as any).user.id;
-    const file = req.file as MulterS3File | undefined;
+    // cast req.user so TS accepts it
+    const user = req.user as { id: string; role?: string } | undefined;
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
-    if (!content && !file) {
-      return res
-        .status(400)
-        .json({ error: "Submission must include content or a file." });
-    }
+    const { content, fileUrl, assignmentId } = req.body;
+    if (!assignmentId) return res.status(400).json({ error: 'assignmentId required' });
 
-    // 1. Save the submission to the database
-    const newSubmission = await prisma.submission.create({
+    const submission = await prisma.submission.create({
       data: {
-        content: content || "",
-        fileUrl: file?.location,
-        studentId,
+        content: content || null,
+        fileUrl: fileUrl || null,
+        studentId: user.id,
         assignmentId,
       },
     });
 
-    // 2. Create a placeholder plagiarism report
-    await prisma.plagiarismReport.create({
-      data: {
-        submissionId: newSubmission.id,
-        status: "PENDING",
-        similarity: 0,
-        aiProbability: 0,
-        highlights: {},
-      },
-    });
-
-    // 3. Add a job to the queue to process this submission
-    await plagiarismQueue.add("check-plagiarism", {
-      submissionId: newSubmission.id,
-    });
-
-    console.log(`Added job to queue for submission ${newSubmission.id}`);
-
-    // 4. Respond to the user immediately
-    res.status(201).json(newSubmission);
-  } catch (err: unknown) {
-    console.error("Error creating submission:", err);
-
-    let message = "Unknown error";
-    if (err instanceof Error) message = err.message;
-
-    res.status(500).json({ error: message });
-  }
-};
-
-export const addGradeToSubmission = async (req: Request, res: Response) => {
-  try {
-    const { submissionId } = req.params;
-    const { grade } = req.body;
-    const teacherId = (req as any).user.id;
-
-    if (!grade) {
-      return res.status(400).json({ error: "Grade is required" });
+    // create initial plagiarism report (PENDING)
+    try {
+      await prisma.plagiarismReport.create({
+        data: {
+          submissionId: submission.id,
+          similarity: 0.0,
+          aiProbability: 0.0,
+          highlights: [],
+          status: 'PENDING',
+        },
+      });
+    } catch (err) {
+      console.warn('Warning: could not create initial PlagiarismReport (might exist):', err);
     }
 
-    // Security Check
-    const submission = await prisma.submission.findUnique({
-      where: { id: submissionId },
-      select: {
-        assignment: {
-          select: {
-            class: {
-              select: {
-                teacherId: true,
-              },
-            },
-          },
+    // enqueue background job
+    try {
+      await plagiarismQueue.add(
+        'processSubmission',
+        {
+          submissionId: submission.id,
+          assignmentId,
+          fileUrl: submission.fileUrl,
         },
-      },
-    });
-
-    if (!submission || submission.assignment.class.teacherId !== teacherId) {
-      return res
-        .status(403)
-        .json({ error: "You are not authorized to grade this submission." });
+        {
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 60_000 },
+        }
+      );
+    } catch (err) {
+      console.error('Failed to enqueue plagiarism job:', err);
     }
 
-    // If authorized, update the submission with the new grade
-    const updatedSubmission = await prisma.submission.update({
-      where: { id: submissionId },
-      data: { grade },
-      include: {
-        student: {
-          select: {
-            name: true,
-            email: true,
-          },
-        },
-        report: true,
-      },
-    });
-
-    res.json(updatedSubmission);
-  } catch (err: unknown) {
-    console.error("Error adding grade:", err);
-
-    let message = "Unknown error";
-    if (err instanceof Error) message = err.message;
-
-    res.status(500).json({ error: message });
+    return res.status(201).json(submission);
+  } catch (err) {
+    console.error('createSubmission error', err);
+    return res.status(500).json({ error: 'Failed to create submission' });
   }
 };
 
 /**
- * Download highlighted PDF (proxy to AI service)
+ * Download highlighted PDF (serves from S3 if present; otherwise proxies AI service)
  * Route: GET /api/submissions/:submissionId/highlighted-pdf
- * Authorization: only the teacher of the class can download
  */
 export const downloadHighlightedPdf = async (req: Request, res: Response) => {
   try {
     const { submissionId } = req.params;
-    const userId = (req as any).user.id;
+    const user = req.user as { id: string; role?: string } | undefined;
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
-    // Fetch submission and teacherId
+    // fetch submission and teacherId for authorization
     const submission = await prisma.submission.findUnique({
       where: { id: submissionId },
       select: {
         id: true,
         fileUrl: true,
         assignment: {
-          select: {
-            class: {
-              select: { teacherId: true },
-            },
-          },
+          select: { class: { select: { teacherId: true } } },
         },
       },
     });
 
-    if (!submission) return res.status(404).json({ error: "Submission not found" });
+    if (!submission) return res.status(404).json({ error: 'Submission not found' });
 
     const teacherId = submission.assignment?.class?.teacherId;
-    if (!teacherId || teacherId !== userId)
-      return res.status(403).json({ error: "Not authorized to download this file." });
+    if (!teacherId || teacherId !== user.id) {
+      return res.status(403).json({ error: 'Not authorized to download this file.' });
+    }
 
-    const AI_SERVICE_URL = process.env.AI_SERVICE_URL || "http://localhost:8000";
+    // check S3 for cached highlight
+    if (S3_BUCKET) {
+      const key = `highlighted/${submissionId}.pdf`;
+      try {
+        await s3.send(new HeadObjectCommand({ Bucket: S3_BUCKET, Key: key }));
+        const getRes = await s3.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: key }));
 
-    // Request highlighted PDF from AI service
-    const aiResponse = await axios.post(
-      `${AI_SERVICE_URL}/highlight_pdf`,
-      { file_url: submission.fileUrl },
-      { responseType: "stream" as const }
-    );
+        const filename = `submission_${submissionId}_highlighted.pdf`;
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
 
-    const contentType = aiResponse.headers["content-type"] || "application/pdf";
-    const contentDisposition =
-      aiResponse.headers["content-disposition"] ||
-      `attachment; filename=submission_${submissionId}_highlighted.pdf`;
+        const body = getRes.Body as Readable | null;
+        if (!body) return res.status(500).json({ error: 'S3 object has no body' });
 
-    res.setHeader("Content-Type", contentType);
-    res.setHeader("Content-Disposition", contentDisposition);
+        body.pipe(res);
+        return;
+      } catch (err) {
+        console.log('Highlighted PDF not found in S3 — falling back to AI service');
+      }
+    }
 
-    const stream = aiResponse.data as unknown as Readable;
-    stream.pipe(res);
-  } catch (err: unknown) {
-    console.error("Error fetching highlighted PDF:", err);
+    // fallback: proxy AI service
+    try {
+      const aiResp = await axios.post(
+        `${AI_SERVICE_URL}/highlight_pdf`,
+        { file_url: submission.fileUrl, submission_id: submission.id },
+        { responseType: 'stream', timeout: 10 * 60 * 1000 }
+      );
 
-    let message = "Failed to fetch highlighted PDF";
-    if (err instanceof Error) message = err.message;
+      const ct = aiResp.headers['content-type'] || 'application/pdf';
+      const cd =
+        aiResp.headers['content-disposition'] ||
+        `attachment; filename=submission_${submissionId}_highlighted.pdf`;
 
-    res.status(500).json({ error: message });
+      res.setHeader('Content-Type', ct);
+      res.setHeader('Content-Disposition', cd);
+
+      const stream = aiResp.data as Readable;
+      stream.pipe(res);
+    } catch (err) {
+      console.error('Error proxying AI highlight_pdf:', err);
+      return res.status(500).json({ error: 'Failed to generate highlighted PDF' });
+    }
+  } catch (err) {
+    console.error('downloadHighlightedPdf error', err);
+    return res.status(500).json({ error: 'Failed to download highlighted PDF' });
   }
 };
