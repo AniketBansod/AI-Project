@@ -9,6 +9,7 @@ import assignmentRoutes from "./src/routes/assignmentRoutes";
 import submissionRoutes from "./src/routes/submissionRoutes"; // 1. Import
 import postRoutes from "./src/routes/postRoutes"; // 1. Import post routes
 import commentRoutes from "./src/routes/commentRoutes"; 
+import submissionCommentRoutes from "./src/routes/submissionCommentRoutes"; // 1. Import
 
 const app = express();
 
@@ -28,7 +29,8 @@ app.get("/protected", authMiddleware, (req, res) => {
 app.use("/auth", authRoutes);
 app.use("/api/classes", classRoutes); // 2. Add this line
 app.use("/api/assignments", assignmentRoutes); 
-
+app.use("/api/submissions", submissionRoutes);
+app.use("/api/submission-comments", submissionCommentRoutes); 
 
 app.use("/api/assignments", assignmentRoutes);
 app.use("/api/submissions", submissionRoutes); // 2. Add this line
