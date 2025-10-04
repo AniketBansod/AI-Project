@@ -11,11 +11,17 @@ interface Match {
   studentName?: string;
 }
 interface Report {
-  id: string;
-  status: "PENDING" | "COMPLETED" | "FAILED";
-  similarity: number;
-  aiProbability: number;
-  highlights: Match[];
+  id?: string;
+  status?: "PENDING" | "COMPLETED" | "FAILED";
+  // support both shapes: "similarity" (float 0..1) OR "similarity_score"
+  similarity?: number;
+  similarity_score?: number;
+  // support both shapes: "aiProbability" OR "ai_probability"
+  aiProbability?: number;
+  ai_probability?: number;
+  // highlights array (some backends use "highlights", some "matches")
+  highlights?: Match[] | null;
+  matches?: Match[] | null;
 }
 interface Submission {
   id: string;
@@ -30,7 +36,20 @@ interface Submission {
   report: Report | null;
 }
 
-// ReportScores component (unchanged)
+// Small helper: convert various raw values to percent (0..100) safely
+function toPercent(value: any): number {
+  if (value === null || value === undefined) return 0;
+  const n = Number(value);
+  if (isNaN(n)) return 0;
+  // If value appears to be fraction between 0 and 1
+  if (n > 0 && n <= 1) return Math.min(100, Math.round(n * 100));
+  // If value already appears to be percentage in 0..100
+  if (n >= 1 && n <= 100) return Math.min(100, Math.round(n));
+  // otherwise clamp to 0
+  return 0;
+}
+
+// ReportScores component — minimal changes: safe parsing & clamping
 const ReportScores = ({ report }: { report: Report | null }) => {
   if (!report) {
     return (
@@ -41,7 +60,9 @@ const ReportScores = ({ report }: { report: Report | null }) => {
     );
   }
 
-  switch (report.status) {
+  const status = report.status ?? "PENDING";
+
+  switch (status) {
     case "PENDING":
       return (
         <div className="text-right">
@@ -59,11 +80,23 @@ const ReportScores = ({ report }: { report: Report | null }) => {
           <span className="text-xs font-semibold text-red-600">Failed</span>
         </div>
       );
-    case "COMPLETED":
-      const simScore = Math.round(report.similarity * 100);
-      const aiScore = Math.round(report.aiProbability * 100);
+    case "COMPLETED": {
+      // pick similarity from either report.similarity or report.similarity_score
+      const rawSimilarity = report.similarity ?? report.similarity_score ?? 0;
+      const rawAi = report.aiProbability ?? report.ai_probability ?? 0;
+
+      const simScore = toPercent(rawSimilarity);
+      const aiScore = toPercent(rawAi);
+
       const getColor = (score: number) =>
         score > 70 ? "bg-red-500" : score > 40 ? "bg-yellow-500" : "bg-green-500";
+
+      // get matches array from either highlights or matches
+      const matches: Match[] = Array.isArray(report.highlights)
+        ? (report.highlights as Match[])
+        : Array.isArray(report.matches)
+        ? (report.matches as Match[])
+        : [];
 
       return (
         <div className="w-full">
@@ -90,14 +123,14 @@ const ReportScores = ({ report }: { report: Report | null }) => {
             </div>
           </div>
 
-          {report.highlights && report.highlights.length > 0 && (
+          {matches.length > 0 && (
             <div className="mt-3 pt-3 border-t text-right">
               <p className="text-xs font-bold text-gray-600">Top Matches:</p>
               <ul className="text-xs text-gray-500 space-y-1 mt-1">
-                {report.highlights.slice(0, 3).map((match) => (
+                {matches.slice(0, 3).map((match) => (
                   <li key={match.submission_id}>
                     vs <span className="font-semibold text-black">{match.studentName || "Unknown"}</span>{" "}
-                    ({Math.round(match.similarity * 100)}%)
+                    ({toPercent(match.similarity)}%)
                   </li>
                 ))}
               </ul>
@@ -105,12 +138,13 @@ const ReportScores = ({ report }: { report: Report | null }) => {
           )}
         </div>
       );
+    }
     default:
       return null;
   }
 };
 
-// Helper: parse filename from Content-Disposition header
+// Helper: parse filename from Content-Disposition header (unchanged)
 function parseFilename(contentDisposition: string | null): string | null {
   if (!contentDisposition) return null;
   const match = /filename\*?=(?:UTF-8'')?['"]?([^;'"]+)['"]?/.exec(contentDisposition);
@@ -120,11 +154,11 @@ function parseFilename(contentDisposition: string | null): string | null {
   return null;
 }
 
-// Main page component
+// Main page component (unchanged except using ReportScores above)
 export default function TeacherAssignmentPage() {
   const router = useRouter();
   const params = useParams();
-  const { assignmentId } = params;
+  const { assignmentId } = params as { assignmentId?: string };
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [gradingSubmission, setGradingSubmission] = useState<Submission | null>(null);
@@ -184,7 +218,7 @@ export default function TeacherAssignmentPage() {
     }
   };
 
-  // NEW: download highlighted PDF with Authorization header and client-side blob download
+  // download highlighted PDF (unchanged)
   const downloadHighlightedPdf = async (submissionId: string) => {
     const token = localStorage.getItem("token");
     if (!token) {
@@ -201,7 +235,6 @@ export default function TeacherAssignmentPage() {
       });
 
       if (!resp.ok) {
-        // try to parse JSON error body
         const ct = resp.headers.get("content-type") || "";
         if (ct.includes("application/json")) {
           const j = await resp.json();
@@ -213,8 +246,6 @@ export default function TeacherAssignmentPage() {
       }
 
       const blob = await resp.blob();
-
-      // get filename from header if present
       const contentDisp = resp.headers.get("content-disposition");
       const filename = parseFilename(contentDisp) || `submission_${submissionId}_highlighted.pdf`;
 
@@ -264,7 +295,6 @@ export default function TeacherAssignmentPage() {
                     </a>
                   )}
 
-                  {/* NEW: button triggers fetch-with-token then download */}
                   <button
                     onClick={() => downloadHighlightedPdf(submission.id)}
                     className="text-sm text-green-600 hover:underline font-semibold bg-transparent border-0 p-0"
