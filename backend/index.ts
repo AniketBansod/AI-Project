@@ -1,20 +1,22 @@
 import express from "express";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import authRoutes from "./src/routes/authRoutes";
 import { authMiddleware } from "./src/middleware/authMiddleware";
 import passport from "passport";
 import "./src/utils/passport"; 
 import classRoutes from "./src/routes/classRoutes"; 
 import assignmentRoutes from "./src/routes/assignmentRoutes";
-import submissionRoutes from "./src/routes/submissionRoutes"; // 1. Import
-import postRoutes from "./src/routes/postRoutes"; // 1. Import post routes
+import submissionRoutes from "./src/routes/submissionRoutes";
+import postRoutes from "./src/routes/postRoutes";
 import commentRoutes from "./src/routes/commentRoutes"; 
-import submissionCommentRoutes from "./src/routes/submissionCommentRoutes"; // 1. Import
+import submissionCommentRoutes from "./src/routes/submissionCommentRoutes";
 
 const app = express();
 
 app.use(cors({ origin: "http://localhost:3000", credentials: true }));
 app.use(express.json());
+app.use(cookieParser());
 app.use(passport.initialize());
 
 // Health check endpoint
