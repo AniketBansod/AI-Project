@@ -43,5 +43,10 @@ router.get(
   isTeacher,
   submissionController.downloadHighlightedPdf
 );
-
+router.post(
+  "/:submissionId/grade",
+  authMiddleware,
+  isTeacher,
+  submissionController.gradeSubmission
+);
 export default router;

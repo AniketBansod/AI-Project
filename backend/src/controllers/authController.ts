@@ -1,12 +1,10 @@
 import { Request, Response } from "express";
 import prisma from "../utils/prisma";
 import { hashPassword, comparePassword, generateToken } from "../utils/auth";
-import { sendEmail } from "../utils/email"; // Import the email utility
+import { sendEmail, generateVerificationEmailHtml } from "../utils/email"; 
 import crypto from "crypto";
-import {
-  generateVerificationEmailHtml // Import the new function
-} from "../utils/email"; 
 
+// ... imports
 
 export const register = async (req: Request, res: Response) => {
   try {
@@ -19,10 +17,12 @@ export const register = async (req: Request, res: Response) => {
     const existingUser = await prisma.user.findUnique({ where: { email } });
     if (existingUser) return res.status(400).json({ error: "Email already exists" });
 
-   const verificationToken = crypto.randomBytes(32).toString("hex");
+    // --- MODIFIED LINE ---
+    // Use base64url for a URL-safe token
+    const verificationToken = crypto.randomBytes(32).toString("base64url"); 
+    
     const hashedPassword = await hashPassword(password);
 
-    // Update the user creation to include the token
     const user = await prisma.user.create({
       data: {
         name,
@@ -33,7 +33,7 @@ export const register = async (req: Request, res: Response) => {
       },
     });
 
-    // Send the verification email
+    // The rest of the function remains the same...
     const verificationUrl = `http://localhost:3000/verify-email/${verificationToken}`;
     const emailHtml = generateVerificationEmailHtml(user.name, verificationUrl);
 
@@ -52,6 +52,10 @@ export const register = async (req: Request, res: Response) => {
   }
 };
 
+// ... rest of the authController file
+
+
+
 export const login = async (req: Request, res: Response) => {
   try {
     const { email, password } = req.body;
@@ -61,23 +65,44 @@ export const login = async (req: Request, res: Response) => {
     }
 
     const user = await prisma.user.findUnique({ where: { email } });
-    if (!user || !user.password) return res.status(401).json({ error: "Invalid credentials" });
 
-    if (user.provider === 'google') {
+    // --- ENHANCED UNIFIED LOGIC ---
+
+    // Case 1: User does not exist at all
+    if (!user) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // Case 2: User exists, signed up with Google, and has NO password set yet.
+    // This is the key scenario we want to handle gracefully.
+    if (user.provider === 'google' && !user.password) {
+      // Tell the frontend that a special action is needed.
       return res.status(403).json({ 
-        error: "You have previously signed in with Google. Please use the 'Sign in with Google' button." 
+        error: "This account was created using Google. Please use the 'Sign in with Google' button, or set a password to sign in with email.",
+        actionRequired: "SET_PASSWORD_FOR_GOOGLE_ACCOUNT" 
       });
     }
-// Add this block
+    
+    // Case 3: User exists and has a password.
+    if (!user.password) {
+        return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // Case 4: Check if the user's email is verified.
     if (!user.emailVerified) {
          return res.status(403).json({ error: "Please verify your email before logging in." });
-      }
+    }
+
+    // Case 5: Compare the provided password.
     const valid = await comparePassword(password, user.password);
-    if (!valid) return res.status(401).json({ error: "Invalid credentials" });
+    if (!valid) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
 
+    // Success: Generate token and log the user in.
     const token = generateToken(user.id, user.role);
+    res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
 
-    res.json({ token, user: { id: user.id, email: user.email, role: user.role } });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Login failed" });
@@ -86,7 +111,6 @@ export const login = async (req: Request, res: Response) => {
   }
 };
 
-// Add this new function in authController.ts
 export const verifyEmail = async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
@@ -114,30 +138,22 @@ export const verifyEmail = async (req: Request, res: Response) => {
   }
 };
 
-// ... other functions
-
 export const googleCallback = (req: Request, res: Response) => {
-  // Passport attaches the user to req.user after successful authentication
   const user = req.user as any;
   if (!user) {
     return res.redirect("http://localhost:3000/login?error=AuthenticationFailed");
   }
 
-  // Generate a JWT for our application
   const token = generateToken(user.id, user.role);
 
-  // Redirect to a frontend page with the token
   res.redirect(`http://localhost:3000/auth/callback?token=${token}`);
 };
-
-// Add this to src/controllers/authController.ts
 
 export const getMe = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user.id;
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      // Select only the fields that are safe to send to the client
       select: { id: true, email: true, name: true, role: true },
     });
 
@@ -150,3 +166,4 @@ export const getMe = async (req: Request, res: Response) => {
     res.status(500).json({ error: "Failed to fetch user profile" });
   }
 };
+

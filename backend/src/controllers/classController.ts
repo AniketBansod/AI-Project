@@ -17,7 +17,6 @@ export const createClass = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Title is required" });
     }
 
-    // Generate join code (consider checking uniqueness in production)
     const joinCode = generateJoinCode();
 
     const newClass = await prisma.class.create({
@@ -27,7 +26,7 @@ export const createClass = async (req: Request, res: Response) => {
         joinCode,
       },
       include: {
-        teacher: { select: { name: true } }, // include teacher info immediately
+        teacher: { select: { name: true } },
       },
     });
 
@@ -46,12 +45,25 @@ export const getClassesForTeacher = async (req: Request, res: Response) => {
     const classes = await prisma.class.findMany({
       where: { teacherId },
       orderBy: { createdAt: "desc" },
+      // --- MODIFIED SECTION ---
       include: {
-        students: { select: { id: true, name: true } }, // optional: include students
+        teacher: { select: { name: true } }, // ✅ Always include the teacher's name
+        _count: { // ✅ Efficiently count the number of students
+          select: { students: true },
+        },
       },
     });
 
-    res.json(classes);
+    // ✅ Map the data to a consistent format for the frontend
+    const formattedClasses = classes.map((c) => ({
+      id: c.id,
+      title: c.title,
+      teacher: c.teacher,
+      studentCount: c._count.students,
+      joinCode: c.joinCode,
+    }));
+
+    res.json(formattedClasses);
   } catch (err) {
     console.error("Error fetching classes:", err);
     res.status(500).json({ error: "Failed to fetch classes" });
@@ -76,7 +88,6 @@ export const joinClass = async (req: Request, res: Response) => {
       return res.status(404).json({ error: "Class with that code not found" });
     }
 
-    // Check if already enrolled
     const isAlreadyEnrolled = await prisma.class.findFirst({
       where: {
         id: classToJoin.id,
@@ -90,7 +101,6 @@ export const joinClass = async (req: Request, res: Response) => {
         .json({ error: "You are already enrolled in this class." });
     }
 
-    // Connect student to the class
     await prisma.class.update({
       where: { id: classToJoin.id },
       data: {
@@ -98,16 +108,25 @@ export const joinClass = async (req: Request, res: Response) => {
       },
     });
 
-    // 🔑 Refetch the class including teacher info
     const enrolledClass = await prisma.class.findUnique({
       where: { id: classToJoin.id },
       include: {
         teacher: { select: { name: true } },
-        students: { select: { id: true, name: true } }, // optional: include students
+        _count: {
+            select: { students: true }
+        }
       },
     });
 
-    res.json(enrolledClass);
+    const formattedClass = {
+        id: enrolledClass!.id,
+        title: enrolledClass!.title,
+        teacher: enrolledClass!.teacher,
+        studentCount: enrolledClass!._count.students,
+        joinCode: enrolledClass!.joinCode
+    }
+
+    res.json(formattedClass);
   } catch (err) {
     console.error("Error joining class:", err);
     res.status(500).json({ error: "Failed to join class" });
@@ -124,9 +143,21 @@ export const getEnrolledClasses = async (req: Request, res: Response) => {
       orderBy: { createdAt: "desc" },
       include: {
         teacher: { select: { name: true } },
+        _count: {
+            select: { students: true }
+        }
       },
     });
-    res.json(classes);
+
+    const formattedClasses = classes.map(c => ({
+        id: c.id,
+        title: c.title,
+        teacher: c.teacher,
+        studentCount: c._count.students,
+        joinCode: c.joinCode
+    }))
+
+    res.json(formattedClasses);
   } catch (err) {
     console.error("Error fetching enrolled classes:", err);
     res.status(500).json({ error: "Failed to fetch classes" });
@@ -134,21 +165,16 @@ export const getEnrolledClasses = async (req: Request, res: Response) => {
 };
 
 // -------------------- Get Class By ID --------------------
-// In src/controllers/classController.ts
-
 export const getClassById = async (req: Request, res: Response) => {
   try {
     const { classId } = req.params;
 
-    // The canAccessClass middleware has already verified permission.
     const course = await prisma.class.findUnique({
       where: { id: classId },
       include: {
-        // Data for Assignments Page
         assignments: { 
-          orderBy: { createdAt: 'desc' } 
+          orderBy: { deadline: 'desc' } 
         },
-        // Data for People Page
         teacher: { 
           select: { name: true } 
         },
@@ -156,7 +182,6 @@ export const getClassById = async (req: Request, res: Response) => {
           select: { id: true, name: true, email: true },
           orderBy: { name: 'asc' }
         },
-        // Data for Stream Page
         posts: {
           orderBy: { createdAt: 'desc' },
           include: {
@@ -164,7 +189,7 @@ export const getClassById = async (req: Request, res: Response) => {
             comments: {
               orderBy: { createdAt: 'asc' },
               include: {
-                author: { select: { name: true } },
+                author: { select: { name: true, role: true } },
               },
             },
           },
@@ -183,13 +208,12 @@ export const getClassById = async (req: Request, res: Response) => {
   }
 };
 
-
+// -------------------- Remove Student From Class --------------------
 export const removeStudentFromClass = async (req: Request, res: Response) => {
   try {
     const { classId, studentId } = req.params;
     const teacherId = (req as any).user.id;
 
-    // Security Check: Verify the user is the teacher of this class
     const course = await prisma.class.findFirst({
       where: { id: classId, teacherId },
     });
@@ -198,7 +222,6 @@ export const removeStudentFromClass = async (req: Request, res: Response) => {
       return res.status(403).json({ error: "You are not the teacher of this class." });
     }
 
-    // Disconnect the student from the class
     await prisma.class.update({
       where: { id: classId },
       data: {
@@ -214,3 +237,4 @@ export const removeStudentFromClass = async (req: Request, res: Response) => {
     res.status(500).json({ error: "Failed to remove student" });
   }
 };
+

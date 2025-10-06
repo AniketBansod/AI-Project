@@ -32,8 +32,8 @@ app.use("/api/assignments", assignmentRoutes);
 app.use("/api/submissions", submissionRoutes);
 app.use("/api/submission-comments", submissionCommentRoutes); 
 
-app.use("/api/assignments", assignmentRoutes);
-app.use("/api/submissions", submissionRoutes); // 2. Add this line
+// app.use("/api/assignments", assignmentRoutes);
+// app.use("/api/submissions", submissionRoutes); // 2. Add this line
 app.use("/api/posts", postRoutes); // 2. Add this line
 app.use("/api/comments", commentRoutes); // 2. Add this line
 //...

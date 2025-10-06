@@ -71,7 +71,8 @@ model Submission {
   id           String    @id @default(cuid())
   content      String?   // Optional for file-only submissions
   fileUrl      String?   // To store the S3 file URL
-  grade        String?   // Add this field for the grade
+  grade        Int?   // Add this field for the grade
+  feedback     String?   // ✅ ADD THIS FIELD
   studentId    String
   assignmentId String
   createdAt    DateTime  @default(now())
@@ -100,6 +101,12 @@ model SubmissionChunk {
   submissionId String
   submission   Submission @relation(fields: [submissionId], references: [id])
   createdAt    DateTime  @default(now())
+  ai_score    Float?   // AI score for the chunk
+  chunk_index Int?     // Index of the chunk
+  start_char  Int?     // Starting character position
+  end_char    Int?     // Ending character position
+  plag_score  Float?   // Plagiarism score
+
 }
 model Post {
   id        String    @id @default(cuid())

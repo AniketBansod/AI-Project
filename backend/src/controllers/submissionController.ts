@@ -103,6 +103,7 @@ export const downloadHighlightedPdf = async (req: Request, res: Response) => {
       select: {
         id: true,
         fileUrl: true,
+        assignmentId: true,
         assignment: {
           select: { class: { select: { teacherId: true } } },
         },
@@ -125,13 +126,6 @@ export const downloadHighlightedPdf = async (req: Request, res: Response) => {
         await s3.send(new HeadObjectCommand({ Bucket: S3_BUCKET, Key: key }));
         const getRes = await s3.send(
           new GetObjectCommand({ Bucket: S3_BUCKET, Key: key })
-        );
-
-        const filename = `submission_${submissionId}_highlighted.pdf`;
-        res.setHeader("Content-Type", "application/pdf");
-        res.setHeader(
-          "Content-Disposition",
-          `attachment; filename=${filename}`
         );
 
         const body = getRes.Body as Readable | null;
@@ -169,5 +163,42 @@ export const downloadHighlightedPdf = async (req: Request, res: Response) => {
   } catch (err) {
     console.error("downloadHighlightedPdf error", err);
     return res.status(500).json({ error: "Failed to download highlighted PDF" });
+  }
+};
+// Add this function to backend/src/controllers/submissionController.ts
+export const gradeSubmission = async (req: Request, res: Response) => {
+  try {
+    const { submissionId } = req.params;
+    const { grade, feedback } = req.body;
+    const teacherId = (req as any).user.id;
+
+    // Security check: Ensure the teacher owns the class this submission belongs to
+    const submission = await prisma.submission.findFirst({
+      where: {
+        id: submissionId,
+        assignment: {
+          class: {
+            teacherId: teacherId,
+          },
+        },
+      },
+    });
+
+    if (!submission) {
+      return res.status(403).json({ error: "You are not authorized to grade this submission." });
+    }
+
+    const updatedSubmission = await prisma.submission.update({
+      where: { id: submissionId },
+      data: {
+        grade: grade,
+        feedback: feedback,
+      },
+    });
+
+    res.status(200).json(updatedSubmission);
+  } catch (err) {
+    console.error("Grading error", err);
+    return res.status(500).json({ error: "Failed to grade submission." });
   }
 };

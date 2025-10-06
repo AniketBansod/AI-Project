@@ -14,6 +14,7 @@ from sentence_transformers import SentenceTransformer
 from sentence_transformers import CrossEncoder
 from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
 from typing import List, Optional
+import numpy as np
 from functools import lru_cache
 import concurrent.futures
 import redis
@@ -55,6 +56,11 @@ PLAG_THRESHOLD = float(os.getenv("PLAG_THRESHOLD", 0.6))
 
 # debug toggle
 DEBUG_SIM = os.getenv("DEBUG_SIM", "false").lower() == "true"
+
+# fusion and lexical gating settings
+RERANK_WEIGHT = float(os.getenv("RERANK_WEIGHT", "0.6"))  # weight for cross-encoder vs vector sim
+LEXICAL_MIN = float(os.getenv("LEXICAL_MIN", "0.08"))     # min lexical similarity to trust semantic match
+LEXICAL_SCALE = float(os.getenv("LEXICAL_SCALE", "0.20"))  # scale factor to turn lexical into [0..~1]
 
 # ---------- NLTK setup ----------
 try:
@@ -214,6 +220,37 @@ def normalize_scores(scores):
             normalized.append(0.0)
     return normalized
 
+# --- Simple lexical similarity helpers (free, no DB extensions needed) ---
+def _char_trigrams(s: str):
+    s = re.sub(r"\s+", " ", (s or "").lower()).strip()
+    if len(s) < 3:
+        return set([s]) if s else set()
+    return {s[i:i+3] for i in range(len(s) - 2)}
+
+def _word_trigrams(s: str):
+    toks = re.findall(r"\w+", (s or "").lower())
+    return {tuple(toks[i:i+3]) for i in range(len(toks) - 2)} if len(toks) >= 3 else set()
+
+def jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    if inter == 0:
+        return 0.0
+    return float(inter) / float(len(a | b))
+
+def lexical_sim(a: str, b: str) -> float:
+    """Return a conservative lexical similarity in [0,1] using char and word trigrams."""
+    try:
+        t1c, t2c = _char_trigrams(a), _char_trigrams(b)
+        t1w, t2w = _word_trigrams(a), _word_trigrams(b)
+        cj = jaccard(t1c, t2c)
+        wj = jaccard(t1w, t2w)
+        # upweight word trigram overlap slightly
+        return clamp01(0.4 * cj + 0.6 * wj)
+    except Exception:
+        return 0.0
+
 # chunking with char offsets
 def chunk_text_with_char_indices(text: str, chunk_size: int = CHUNK_SIZE_WORDS, overlap: int = CHUNK_OVERLAP_WORDS):
     # find tokens as sequences of non-space characters (keeps punctuation)
@@ -366,6 +403,18 @@ class PlagiarismResponse(BaseModel):
     ai_probability: float
     matches: List[MatchItem] = []
 
+class PairRequest(BaseModel):
+    file_url_a: Optional[str] = None
+    file_url_b: Optional[str] = None
+    text_a: Optional[str] = None
+    text_b: Optional[str] = None
+
+class PairResponse(BaseModel):
+    embed_sim: float
+    cross_score: float
+    lexical_sim: float
+    fused: float
+
 # ---------- Main endpoints ----------
 @app.post("/check", response_model=PlagiarismResponse)
 def check_plagiarism(request: PlagiarismRequest):
@@ -448,12 +497,18 @@ def check_plagiarism(request: PlagiarismRequest):
                 )
                 rows = cur.fetchall()
                 if rows:
-                    # initial sim list
+                    # initial sim list with lexical pre-check
                     candidates = []
                     for r in rows:
                         sid, candidate_text, sim = r[0], r[1], float(r[2])
                         sim = clamp01(sim)   # clamp to [0,1] immediately
-                        candidates.append({"submission_id": sid, "candidate_text": candidate_text, "sim": sim})
+                        lex = lexical_sim(chunk_text, candidate_text)
+                        candidates.append({
+                            "submission_id": sid,
+                            "candidate_text": candidate_text,
+                            "sim": sim,
+                            "lex": lex,
+                        })
                     # rerank with cross-encoder if available
                     if cross_reranker:
                         pairs = [[chunk_text, cand["candidate_text"]] for cand in candidates]
@@ -462,32 +517,45 @@ def check_plagiarism(request: PlagiarismRequest):
                             if scores is None:
                                 scores = [0.0] * len(candidates)
                             norm_scores = normalize_scores(scores)
-                            # take best normalized score
-                            best = max(norm_scores) if norm_scores else 0.0
-                            plag_score = float(best)
-                            # update match_best using the stronger of normalized rerank score and raw vector sim
+                            # fuse scores + lexical gating
+                            best = 0.0
                             for j, cand in enumerate(candidates):
                                 sid = cand["submission_id"]
                                 rnorm = norm_scores[j] if j < len(norm_scores) else 0.0
-                                combined = max(rnorm, cand["sim"])
-                                if combined > match_best.get(sid, 0.0):
-                                    match_best[sid] = combined
+                                fused = clamp01(RERANK_WEIGHT * rnorm + (1.0 - RERANK_WEIGHT) * cand["sim"])
+                                # lexical attenuation: below LEXICAL_MIN, strongly downweight
+                                lex = cand.get("lex", 0.0)
+                                atten = 1.0 if lex >= LEXICAL_MIN else max(0.0, min(1.0, lex / max(1e-6, LEXICAL_SCALE)))
+                                fused *= atten
+                                best = max(best, fused)
+                                if fused > match_best.get(sid, 0.0):
+                                    match_best[sid] = fused
+                            plag_score = float(best)
                         except Exception as e:
                             # fallback to vector similarity
-                            plag_score = max(c["sim"] for c in candidates)
+                            # apply lexical attenuation in fallback
+                            best = 0.0
                             for cand in candidates:
+                                lex = cand.get("lex", 0.0)
+                                atten = 1.0 if lex >= LEXICAL_MIN else max(0.0, min(1.0, lex / max(1e-6, LEXICAL_SCALE)))
+                                combined = cand["sim"] * atten
+                                best = max(best, combined)
                                 sid = cand["submission_id"]
-                                simv = cand["sim"]
-                                if simv > match_best.get(sid, 0.0):
-                                    match_best[sid] = simv
+                                if combined > match_best.get(sid, 0.0):
+                                    match_best[sid] = combined
+                            plag_score = float(best)
                     else:
-                        # no reranker: use raw sim
-                        plag_score = max(c["sim"] for c in candidates)
+                        # no reranker: use raw sim with lexical attenuation
+                        best = 0.0
                         for cand in candidates:
+                            lex = cand.get("lex", 0.0)
+                            atten = 1.0 if lex >= LEXICAL_MIN else max(0.0, min(1.0, lex / max(1e-6, LEXICAL_SCALE)))
+                            combined = cand["sim"] * atten
+                            best = max(best, combined)
                             sid = cand["submission_id"]
-                            simv = cand["sim"]
-                            if simv > match_best.get(sid, 0.0):
-                                match_best[sid] = simv
+                            if combined > match_best.get(sid, 0.0):
+                                match_best[sid] = combined
+                        plag_score = float(best)
             except Exception as e:
                 print("Plag check error for chunk:", e)
                 plag_score = 0.0
@@ -507,8 +575,9 @@ def check_plagiarism(request: PlagiarismRequest):
             )
             doc_rows = cur.fetchall()
             if doc_rows:
-                # clamp raw DB similarities
+                # clamp raw DB similarities and compute lexical similarity vs each candidate chunk
                 raw_sims = [clamp01(float(r[2])) for r in doc_rows]
+                lex_list = [lexical_sim(submission_text, r[1]) for r in doc_rows]
                 if cross_reranker:
                     pairs = [[submission_text, r[1]] for r in doc_rows]
                     try:
@@ -516,20 +585,35 @@ def check_plagiarism(request: PlagiarismRequest):
                         if scores is None:
                             scores = [0.0] * len(doc_rows)
                         norm_scores = normalize_scores(scores)
-                        # update match_best using normalized reranker OR raw sim, whichever is stronger
+                        # combine with lexical attenuation
+                        combined_list = []
                         for j, r in enumerate(doc_rows):
                             sid = r[0]
-                            val = norm_scores[j] if j < len(norm_scores) else raw_sims[j]
-                            combined = max(raw_sims[j], val)
-                            if combined > match_best.get(sid, 0.0):
-                                match_best[sid] = combined
-                        # doc_top_mean: mean of combined normalized signals
-                        combined_list = [max(raw_sims[i], (norm_scores[i] if i < len(norm_scores) else 0.0)) for i in range(len(doc_rows))]
+                            rnorm = norm_scores[j] if j < len(norm_scores) else 0.0
+                            fused = clamp01(RERANK_WEIGHT * rnorm + (1.0 - RERANK_WEIGHT) * raw_sims[j])
+                            lex = lex_list[j]
+                            atten = 1.0 if lex >= LEXICAL_MIN else max(0.0, min(1.0, lex / max(1e-6, LEXICAL_SCALE)))
+                            fused *= atten
+                            combined_list.append(fused)
+                            if fused > match_best.get(sid, 0.0):
+                                match_best[sid] = fused
                         doc_top_mean = statistics.mean(combined_list) if combined_list else 0.0
                     except Exception as e:
-                        doc_top_mean = statistics.mean(raw_sims) if raw_sims else 0.0
+                        # fallback: lexical-attenuated mean
+                        att = []
+                        for j in range(len(raw_sims)):
+                            lex = lex_list[j]
+                            atten = 1.0 if lex >= LEXICAL_MIN else max(0.0, min(1.0, lex / max(1e-6, LEXICAL_SCALE)))
+                            att.append(raw_sims[j] * atten)
+                        doc_top_mean = statistics.mean(att) if att else 0.0
                 else:
-                    doc_top_mean = statistics.mean(raw_sims) if raw_sims else 0.0
+                    # no reranker: lexical-attenuated mean
+                    att = []
+                    for j in range(len(raw_sims)):
+                        lex = lex_list[j]
+                        atten = 1.0 if lex >= LEXICAL_MIN else max(0.0, min(1.0, lex / max(1e-6, LEXICAL_SCALE)))
+                        att.append(raw_sims[j] * atten)
+                    doc_top_mean = statistics.mean(att) if att else 0.0
         except Exception as e:
             print("Doc-level similarity error:", e)
             doc_top_mean = 0.0
@@ -609,6 +693,100 @@ def check_plagiarism(request: PlagiarismRequest):
         matches=[MatchItem(**m) for m in result["matches"]]
     )
 
+# ---------- Pairwise similarity (diagnostic) ----------
+def _fetch_text_from_source(url: Optional[str], text_fallback: Optional[str]) -> str:
+    # Support HTTP(S), local file URLs (file://), and absolute Windows paths
+    if url:
+        lower = url.lower()
+        # Windows absolute path or file://
+        is_file_url = lower.startswith('file://')
+        is_win_path = re.match(r'^[a-zA-Z]:\\', url) is not None or url.startswith('/')
+        if is_file_url or is_win_path:
+            try:
+                path = url[7:] if is_file_url else url
+                # normalize backslashes
+                path = path.replace('/', '\\') if re.match(r'^[a-zA-Z]:/', path) else path
+                with open(path, 'rb') as f:
+                    data = f.read()
+                if lower.endswith('.pdf') or path.lower().endswith('.pdf'):
+                    return extract_text_from_pdf(data)
+                if lower.endswith('.docx') or path.lower().endswith('.docx'):
+                    return extract_text_from_docx(data)
+                # default: assume text file
+                try:
+                    return data.decode('utf-8', errors='ignore')
+                except Exception:
+                    return ''
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to read local file {url}: {e}")
+        # HTTP(S)
+        try:
+            r = requests.get(url, timeout=30)
+            r.raise_for_status()
+            if lower.endswith('.pdf'):
+                return extract_text_from_pdf(r.content)
+            elif lower.endswith('.docx'):
+                return extract_text_from_docx(r.content)
+            else:
+                return r.text
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch source {url}: {e}")
+    if text_fallback:
+        return text_fallback
+    return ''
+
+def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
+    try:
+        denom = (np.linalg.norm(a) * np.linalg.norm(b))
+        if denom == 0:
+            return 0.0
+        return float(np.dot(a, b) / denom)
+    except Exception:
+        return 0.0
+
+@app.post('/pair_similarity', response_model=PairResponse)
+def pair_similarity(req: PairRequest):
+    text_a = _fetch_text_from_source(req.file_url_a, req.text_a)
+    text_b = _fetch_text_from_source(req.file_url_b, req.text_b)
+    if not text_a.strip() or not text_b.strip():
+        raise HTTPException(status_code=400, detail='Both sources must have text')
+
+    # embeddings
+    try:
+        va = similarity_model.encode([text_a], convert_to_numpy=True, show_progress_bar=False)[0]
+        vb = similarity_model.encode([text_b], convert_to_numpy=True, show_progress_bar=False)[0]
+        embed_sim = clamp01((1.0 + _cosine_sim(va, vb)) / 2.0)  # map [-1,1] -> [0,1]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Embedding failed: {e}")
+
+    # cross encoder
+    cross_score = 0.0
+    if cross_reranker:
+        try:
+            # limit text lengths for model input
+            ta = text_a[:2000]
+            tb = text_b[:2000]
+            score = cross_reranker.predict([[ta, tb]], show_progress_bar=False)
+            norm = normalize_scores([score[0] if isinstance(score, (list, np.ndarray)) else score])
+            cross_score = float(norm[0]) if norm else 0.0
+        except Exception:
+            cross_score = 0.0
+
+    # lexical
+    lex = lexical_sim(text_a, text_b)
+
+    # fuse + lexical attenuation
+    fused = clamp01(RERANK_WEIGHT * cross_score + (1.0 - RERANK_WEIGHT) * embed_sim)
+    atten = 1.0 if lex >= LEXICAL_MIN else max(0.0, min(1.0, lex / max(1e-6, LEXICAL_SCALE)))
+    fused *= atten
+
+    return PairResponse(
+        embed_sim=round(embed_sim, 4),
+        cross_score=round(cross_score, 4),
+        lexical_sim=round(lex, 4),
+        fused=round(float(fused), 4),
+    )
+
 # ---------- PDF helpers ----------
 def extract_text_from_pdf(content: bytes) -> str:
     try:
@@ -635,14 +813,35 @@ def highlight_pdf(request: HighlightRequest = Body(...)):
     if not request.file_url and not request.submission_id:
         raise HTTPException(status_code=400, detail="file_url or submission_id is required")
 
+    # resolve file_url from DB if only submission_id provided
+    file_url = request.file_url
+    if not file_url and request.submission_id:
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute('SELECT "fileUrl" FROM "Submission" WHERE id = %s', (request.submission_id,))
+            row = cur.fetchone()
+            cur.close()
+            release_db_connection(conn)
+            file_url = row[0] if row and row[0] else None
+        except Exception as e:
+            try:
+                cur.close()
+            except Exception:
+                pass
+            try:
+                release_db_connection(conn)
+            except Exception:
+                pass
+            file_url = None
+        if not file_url:
+            raise HTTPException(status_code=400, detail="Unable to resolve file_url for submission_id")
+
     # fetch pdf
     try:
-        resp = requests.get(request.file_url, timeout=30) if request.file_url else requests.get("")  # placeholder if file_url not used
-        if request.file_url:
-            resp.raise_for_status()
-            pdf_content = resp.content
-        else:
-            raise HTTPException(status_code=400, detail="file_url required for highlight endpoint in current implementation")
+        resp = requests.get(file_url, timeout=30)
+        resp.raise_for_status()
+        pdf_content = resp.content
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch PDF: {e}")
 
@@ -683,7 +882,7 @@ def highlight_pdf(request: HighlightRequest = Body(...)):
         if conn:
             release_db_connection(conn)
 
-    # highlight helper
+    # highlight helper (word-span)
     def highlight_word_span(page_obj, span_words, color):
         for w in span_words:
             try:
@@ -692,6 +891,29 @@ def highlight_pdf(request: HighlightRequest = Body(...)):
                 annot.update()
             except Exception:
                 continue
+
+    # fallback highlight using page.search_for
+    def search_and_highlight(page_obj, phrase: str, color):
+        try:
+            if not phrase:
+                return False
+            # limit phrase length to improve search
+            phrase = re.sub(r"\s+", " ", phrase).strip()
+            if len(phrase) > 200:
+                phrase = phrase[:200]
+            rects = page_obj.search_for(phrase)
+            hit = False
+            for r in rects:
+                try:
+                    annot = page_obj.add_highlight_annot(r)
+                    annot.set_colors(stroke=color)
+                    annot.update()
+                    hit = True
+                except Exception:
+                    continue
+            return hit
+        except Exception:
+            return False
 
     # map each chunk to page tokens & highlight (best-effort)
     for chunk in chunks:
@@ -729,6 +951,32 @@ def highlight_pdf(request: HighlightRequest = Body(...)):
                 remaining = remaining[span_len:]
                 if not remaining:
                     break
+
+        # fallback: if nothing matched via token alignment, try searching phrases on each page
+        if not matched_any:
+            ai_p = clamp01(float(chunk.get("ai_score", 0.0)))
+            plag_p = clamp01(float(chunk.get("plag_score", 0.0)))
+            if ai_p >= AI_THRESHOLD or plag_p >= PLAG_THRESHOLD:
+                # build small windows of tokens to improve search hit rate
+                toks = [t for t in re.findall(r"\w+", chunk["text"]) if t]
+                if toks:
+                    win = 8
+                    step = 5
+                    phrases = []
+                    for st in range(0, max(1, len(toks) - win + 1), step):
+                        phrase = " ".join(toks[st: st + win])
+                        if len(phrase) > 12:
+                            phrases.append(phrase)
+                        if len(phrases) >= 3:
+                            break
+                    color = (0.5, 0, 0.5) if (ai_p >= AI_THRESHOLD and plag_p >= PLAG_THRESHOLD) else ((0, 0, 1) if ai_p >= AI_THRESHOLD else (1, 0, 0))
+                    for page_idx in range(len(doc)):
+                        hit = False
+                        page = doc[page_idx]
+                        for phrase in phrases:
+                            if search_and_highlight(page, phrase, color):
+                                hit = True
+                        matched_any = matched_any or hit
 
     # save pdf to bytes
     pdf_bytes = io.BytesIO()
