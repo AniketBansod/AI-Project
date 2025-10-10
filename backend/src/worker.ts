@@ -38,20 +38,20 @@ const worker = new Worker<JobData>(
     const { submissionId } = job.data;
     if (!submissionId) throw new Error('Job missing submissionId');
 
-    console.log(`Worker: processing submission ${submissionId}`);
+    console.log(`🧠 Worker: Processing submission ${submissionId}`);
 
-    // Fetch submission from DB
+    // Fetch submission
     const submission = await prisma.submission.findUnique({
       where: { id: submissionId },
       select: { id: true, content: true, fileUrl: true, assignmentId: true },
     });
 
     if (!submission) {
-      console.warn(`Worker: submission ${submissionId} not found; skipping`);
+      console.warn(`⚠️ Worker: submission ${submissionId} not found — skipping`);
       return;
     }
 
-    // 1) Call AI service /check
+    // 1️⃣ Call AI service /check
     let aiResult: AiResult | null = null;
     try {
       const resp = await axios.post<AiResult>(
@@ -62,11 +62,14 @@ const worker = new Worker<JobData>(
           text_content: submission.content,
           file_url: submission.fileUrl,
         },
-        { timeout: 10 * 60 * 1000 }
+        { timeout: 15 * 60 * 1000 } // 15-minute timeout safety
       );
       aiResult = resp.data;
+      console.log(`✅ Worker: AI check complete for ${submissionId} (similarity=${aiResult.similarity_score.toFixed(3)}, ai_prob=${aiResult.ai_probability.toFixed(3)})`);
     } catch (err) {
-      console.error(`❌ Worker: AI /check failed for ${submissionId}:`, err);
+      const errorMessage = (err instanceof Error) ? err.message : String(err);
+      console.error(`❌ Worker: AI /check failed for ${submissionId}:`, errorMessage);
+      // mark REPORT as FAILED
       try {
         await prisma.plagiarismReport.upsert({
           where: { submissionId },
@@ -85,31 +88,33 @@ const worker = new Worker<JobData>(
       throw err;
     }
 
-    // 2) Resolve student names for matches
+    // 2️⃣ Resolve student names for matches
     let matchesWithNames: any[] = [];
     try {
-      const matchedIds = aiResult?.matches.map((m) => m.submission_id) || [];
-      const matchedSubs = matchedIds.length
-        ? await prisma.submission.findMany({
-            where: { id: { in: matchedIds } },
-            select: { id: true, student: { select: { name: true } } },
-          })
-        : [];
+      const matchedIds = aiResult?.matches?.map((m) => m.submission_id) || [];
+      const matchedSubs =
+        matchedIds.length > 0
+          ? await prisma.submission.findMany({
+              where: { id: { in: matchedIds } },
+              select: { id: true, student: { select: { name: true } } },
+            })
+          : [];
 
-      matchesWithNames = aiResult?.matches.map((m) => {
-        const found = matchedSubs.find((s) => s.id === m.submission_id);
-        return {
-          submission_id: m.submission_id,
-          similarity: m.similarity,
-          studentName: found?.student?.name || 'Unknown',
-        };
-      }) || [];
+      matchesWithNames =
+        aiResult?.matches?.map((m) => {
+          const found = matchedSubs.find((s) => s.id === m.submission_id);
+          return {
+            submission_id: m.submission_id,
+            similarity: m.similarity,
+            studentName: found?.student?.name || 'Unknown',
+          };
+        }) || [];
     } catch (err) {
-      console.warn('Worker: could not resolve student names for matches', err);
+      console.warn('⚠️ Worker: could not resolve student names for matches', err);
       matchesWithNames = aiResult?.matches || [];
     }
 
-    // 3) Upsert plagiarism report
+    // 3️⃣ Upsert plagiarism report
     try {
       await prisma.plagiarismReport.upsert({
         where: { submissionId: submission.id },
@@ -127,14 +132,15 @@ const worker = new Worker<JobData>(
           status: 'COMPLETED',
         },
       });
+      console.log(`📦 Worker: plagiarismReport written for ${submissionId}`);
     } catch (err) {
-      console.error('Worker: failed to write plagiarism report to DB:', err);
+      console.error('❌ Worker: failed to write plagiarism report to DB:', err);
     }
 
-    // 4) Generate highlighted PDF and upload to S3
+    // 4️⃣ Generate highlighted PDF + upload to S3
     if (submission.fileUrl && S3_BUCKET) {
       try {
-        console.log(`Worker: requesting highlighted PDF for ${submission.id}`);
+        console.log(`🖍️ Worker: Requesting highlighted PDF for ${submission.id}`);
         const resp = await axios.post<ArrayBuffer>(
           `${AI_SERVICE_URL}/highlight_pdf`,
           {
@@ -162,26 +168,46 @@ const worker = new Worker<JobData>(
         console.error(`⚠️ Worker: highlight PDF generation/upload failed for ${submission.id}`, err);
       }
     } else {
-      console.log(`Worker: no fileUrl or S3_BUCKET not set — skipping highlight for ${submission.id}`);
+      console.log(`ℹ️ Worker: no fileUrl or S3_BUCKET not set — skipping highlight for ${submission.id}`);
     }
 
-    console.log(`✅ Worker: finished processing submission ${submissionId}`);
+    console.log(`🎯 Worker: finished processing submission ${submissionId}`);
   },
-  { connection }
+  {
+    connection,
+    // automatic cleanup to keep Redis small
+    removeOnComplete: { age: 3600, count: 1000 }, // keep jobs for 1 hour or last 1000
+    removeOnFail: { age: 86400 }, // failed jobs kept 24h
+  }
 );
 
-// Handle job failures
-worker.on('failed', (job, err) => {
+// Handle job failures globally
+worker.on('failed', async (job, err) => {
   if (!job) {
     console.error('Worker: a job failed but job is undefined', err);
     return;
   }
   console.error(`❌ Worker: job ${job.id} failed:`, err);
+
+  // update report status in case of failure
+  try {
+    await prisma.plagiarismReport.updateMany({
+      where: { submissionId: (job.data as any).submissionId },
+      data: { status: 'FAILED' },
+    });
+  } catch (e) {
+    console.error('Worker: failed to mark job as FAILED in DB', e);
+  }
 });
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
-  console.log('Worker: shutting down...');
+  console.log('🛑 Worker: shutting down...');
   await worker.close();
+  await connection.quit();
   process.exit(0);
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled rejection in worker:', err);
 });
