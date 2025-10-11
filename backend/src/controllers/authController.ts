@@ -167,3 +167,62 @@ export const getMe = async (req: Request, res: Response) => {
   }
 };
 
+// ===== Forgot password (OTP via email) =====
+const forgotOtpStore: Record<string, { tokenHash: string; expires: number }> = {};
+
+export const forgotPasswordRequest = async (req: Request, res: Response) => {
+  try {
+    const { email } = req.body as { email?: string };
+    if (!email) return res.status(400).json({ error: "Email is required" });
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      // Don't reveal if email exists
+      return res.json({ message: "If an account exists for this email, an OTP has been sent." });
+    }
+
+    const otp = (Math.floor(100000 + Math.random() * 900000)).toString();
+    const tokenHash = crypto.createHash("sha256").update(otp).digest("hex");
+    forgotOtpStore[email] = { tokenHash, expires: Date.now() + 10 * 60 * 1000 };
+
+    await sendEmail({
+      to: email,
+      subject: "Your AI Classroom password reset OTP",
+      html: `<p>Use this OTP to reset your password: <strong>${otp}</strong></p><p>It expires in 10 minutes.</p>`
+    });
+
+    res.json({ message: "If an account exists for this email, an OTP has been sent." });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to start password reset" });
+  }
+};
+
+export const resetPasswordVerify = async (req: Request, res: Response) => {
+  try {
+    const { email, otp, newPassword } = req.body as { email?: string; otp?: string; newPassword?: string };
+    if (!email || !otp || !newPassword) return res.status(400).json({ error: "Email, OTP and new password are required" });
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) return res.status(400).json({ error: "Invalid request" });
+
+    const record = forgotOtpStore[email];
+    if (!record) return res.status(400).json({ error: "Invalid or expired OTP" });
+    if (record.expires < Date.now()) {
+      delete forgotOtpStore[email];
+      return res.status(400).json({ error: "OTP expired" });
+    }
+    const tokenHash = crypto.createHash("sha256").update(otp).digest("hex");
+    if (tokenHash !== record.tokenHash) return res.status(400).json({ error: "Invalid OTP" });
+
+    const hashed = await hashPassword(newPassword);
+    await prisma.user.update({ where: { email }, data: { password: hashed } });
+    delete forgotOtpStore[email];
+
+    res.json({ message: "Password reset successfully" });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to reset password" });
+  }
+};
+

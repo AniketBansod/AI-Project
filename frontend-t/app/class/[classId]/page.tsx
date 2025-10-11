@@ -61,6 +61,7 @@ export default function ClassPage() {
   const [classData, setClassData] = useState<ClassData | null>(null)
   const [userRole, setUserRole] = useState("") // Use a simple string
   const [copied, setCopied] = useState(false)
+  const [tab, setTab] = useState<string>("stream")
 
   useEffect(() => {
     const token = localStorage.getItem("token")
@@ -70,9 +71,20 @@ export default function ClassPage() {
     }
 
     const user = localStorage.getItem("user")
+    let teacher = false
     if (user) {
       const userData = JSON.parse(user)
       setUserRole(userData.role)
+      teacher = (userData.role || "").toUpperCase() === "TEACHER"
+    }
+
+    // Restore last selected tab for this class, or default to assignments for teachers
+    const savedTab = localStorage.getItem(`classTab:${params.classId}`)
+    if (savedTab === "stream" || savedTab === "assignments" || savedTab === "people") {
+      setTab(savedTab)
+    } else {
+      // If teacher and no saved tab, default to assignments for better UX
+      setTab(teacher ? "assignments" : "stream")
     }
 
     fetchClassData()
@@ -145,8 +157,8 @@ export default function ClassPage() {
       <Navbar />
       <main className="container mx-auto px-4 py-8">
         <div className="mb-8">
-          <h1 className="text-3xl font-bold mb-3 text-balance">{classData.title}</h1>
-          <div className="flex items-center gap-2">
+          <h1 className="text-2xl sm:text-3xl font-bold mb-3 text-balance">{classData.title}</h1>
+          <div className="flex items-center gap-2 flex-wrap">
             <Badge variant="secondary" className="font-mono text-sm px-3 py-1">
               {classData.joinCode}
             </Badge>
@@ -156,7 +168,7 @@ export default function ClassPage() {
           </div>
         </div>
 
-        <Tabs defaultValue="stream" className="w-full">
+        <Tabs value={tab} onValueChange={(v) => { setTab(v); localStorage.setItem(`classTab:${params.classId}`, v) }} className="w-full">
           <TabsList className="grid w-full max-w-md grid-cols-3 mb-8">
             <TabsTrigger value="stream">Stream</TabsTrigger>
             <TabsTrigger value="assignments">Assignments</TabsTrigger>

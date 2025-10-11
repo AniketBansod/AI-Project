@@ -28,4 +28,8 @@ router.get(
 // It can go anywhere before the `export default router;`
 router.get("/me", authMiddleware, authController.getMe);
 
+// Forgot password via OTP
+router.post("/password/forgot", authController.forgotPasswordRequest);
+router.post("/password/reset-verify", authController.resetPasswordVerify);
+
 export default router;

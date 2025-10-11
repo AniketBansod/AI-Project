@@ -57,19 +57,31 @@ export default function SubmissionsPage() {
   const [selectedSubmission, setSelectedSubmission] = useState<Submission | null>(null)
 
   // fetch function
-  const fetchAssignmentData = async () => {
+  const fetchAssignmentData = async (): Promise<boolean> => {
     if (!assignment) setLoading(true)
     try {
       const response = await api.get(`/api/assignments/${params.assignmentId}/submissions`)
       setAssignment(response.data)
+      return true
     } catch (error: any) {
       toast({
         title: "Error",
         description: error.response?.data?.error || "Failed to load submissions.",
         variant: "destructive",
       })
+      return false
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleRefresh = async () => {
+    const ok = await fetchAssignmentData()
+    if (ok) {
+      toast({
+        title: "Page refreshed",
+        description: "Submissions have been updated.",
+      })
     }
   }
 
@@ -191,7 +203,7 @@ export default function SubmissionsPage() {
           <div>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-semibold">Student Submissions</h2>
-              <Button size="sm" variant="outline" onClick={fetchAssignmentData}>
+              <Button size="sm" variant="outline" onClick={handleRefresh}>
                 Refresh
               </Button>
             </div>

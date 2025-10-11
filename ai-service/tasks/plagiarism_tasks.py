@@ -315,7 +315,23 @@ def run_check(submission_id, assignment_id=None, text_content=None, file_url=Non
                             _debug("➡️ Adapted query shape {}", q_emb.shape)
 
                         # 🧭 Search the FAISS index with broader K, then filter by assignment and dedupe
-                        search_k = max(top_k * 10, 30)
+                        # Increase K dynamically to improve recall when the global index is large
+                        try:
+                            total_meta = len(vi.meta or [])
+                        except Exception:
+                            total_meta = 100
+                        # Estimate per-assignment count (cached)
+                        assign_cnt = 0
+                        if assignment_id:
+                            key_cnt = ("assign_count", assignment_id)
+                            assign_cnt = _small_cache.get(key_cnt) or 0
+                            if assign_cnt == 0:
+                                try:
+                                    assign_cnt = sum(1 for m in (vi.meta or []) if (m or {}).get("assignment_id") == assignment_id)
+                                except Exception:
+                                    assign_cnt = 0
+                        search_k = max(top_k * 50, 200, assign_cnt * 50)
+                        search_k = min(search_k, total_meta)
                         D, I = vi.index.search(q_emb, search_k)
                         _debug("FAISS search results: D={}, I={}", D.tolist(), I.tolist())
 
@@ -620,8 +636,23 @@ def generate_highlighted_pdf(file_url, submission_id=None, assignment_id=None):
                     else:
                         pad = np.zeros((q.shape[0], index_dim - q.shape[1]), dtype=q.dtype)
                         q = np.concatenate([q, pad], axis=1)
-                # broader search then filter
-                D, I = vi.index.search(q, 50)
+                # broader search then filter — use dynamic K to improve recall
+                try:
+                    total_meta = len(vi.meta or [])
+                except Exception:
+                    total_meta = 100
+                assign_cnt = 0
+                if assignment_id:
+                    key_cnt = ("assign_count", assignment_id)
+                    assign_cnt = _small_cache.get(key_cnt) or 0
+                    if assign_cnt == 0:
+                        try:
+                            assign_cnt = sum(1 for m in (vi.meta or []) if (m or {}).get("assignment_id") == assignment_id)
+                        except Exception:
+                            assign_cnt = 0
+                search_k = max(200, assign_cnt * 50)
+                search_k = min(search_k, total_meta)
+                D, I = vi.index.search(q, search_k)
                 best_sid = None
                 for dist, idx in zip(D[0], I[0]):
                     if idx >= len(vi.meta):

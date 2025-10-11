@@ -114,21 +114,31 @@ export function PlagiarismCheckButton({ submission }: PlagiarismCheckButtonProps
   }
 
   const getSeverityColor = (value: number) => {
-    if (value >= 0.7) return "text-destructive"
-    if (value >= 0.4) return "text-yellow-600"
+    // value is percentage (0-100)
+    if (value >= 70) return "text-destructive"
+    if (value >= 40) return "text-yellow-600"
     return "text-green-600"
   }
 
   const getSeverityIcon = (value: number) => {
-    if (value >= 0.7) return <XCircle className="h-5 w-5 text-destructive" />
-    if (value >= 0.4) return <AlertTriangle className="h-5 w-5 text-yellow-600" />
+    // value is percentage (0-100)
+    if (value >= 70) return <XCircle className="h-5 w-5 text-destructive" />
+    if (value >= 40) return <AlertTriangle className="h-5 w-5 text-yellow-600" />
     return <CheckCircle2 className="h-5 w-5 text-green-600" />
   }
 
   const getSeverityLabel = (value: number) => {
-    if (value >= 0.7) return "High Risk"
-    if (value >= 0.4) return "Medium Risk"
+    // value is percentage (0-100)
+    if (value >= 70) return "High Risk"
+    if (value >= 40) return "Medium Risk"
     return "Low Risk"
+  }
+
+  const getBadgeVariant = (value: number): "default" | "secondary" | "destructive" => {
+    // Map percent to badge variant
+    if (value >= 70) return "destructive"
+    if (value >= 40) return "secondary"
+    return "default"
   }
 
   return (
@@ -181,11 +191,7 @@ export function PlagiarismCheckButton({ submission }: PlagiarismCheckButtonProps
                       <span className={`text-3xl font-bold ${getSeverityColor(result.similarity * 100)}`}>
                         {(result.similarity * 100).toFixed(1)}%
                       </span>
-                      <Badge
-                        variant={
-                          result.similarity >= 0.7 ? "destructive" : result.similarity >= 0.4 ? "secondary" : "default"
-                        }
-                      >
+                      <Badge variant={getBadgeVariant(result.similarity * 100)}>
                         {getSeverityLabel(result.similarity * 100)}
                       </Badge>
                     </div>
@@ -194,8 +200,14 @@ export function PlagiarismCheckButton({ submission }: PlagiarismCheckButtonProps
                   {/* AI probability display */}
                   <div className="text-right">
                     <p className="text-sm text-muted-foreground">AI Probability</p>
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium">{(result.aiProbability * 100).toFixed(1)}%</span>
+                    <div className="flex items-center gap-2 justify-end">
+                      {getSeverityIcon(result.aiProbability * 100)}
+                      <span className={`font-medium ${getSeverityColor(result.aiProbability * 100)}`}>
+                        {(result.aiProbability * 100).toFixed(1)}%
+                      </span>
+                      <Badge variant={getBadgeVariant(result.aiProbability * 100)}>
+                        {getSeverityLabel(result.aiProbability * 100)}
+                      </Badge>
                     </div>
                     <Progress value={Math.round(result.aiProbability * 100)} className="h-2 mt-2" />
                   </div>
@@ -204,7 +216,9 @@ export function PlagiarismCheckButton({ submission }: PlagiarismCheckButtonProps
                 <div className="space-y-2">
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-muted-foreground">Similarity Level</span>
-                    <span className={`font-medium ${getSeverityColor(result.similarity * 100)}`}>{(result.similarity * 100).toFixed(1)}%</span>
+                    <span className={`font-medium ${getSeverityColor(result.similarity * 100)}`}>
+                      {(result.similarity * 100).toFixed(1)}%
+                    </span>
                   </div>
                   <Progress value={result.similarity * 100} className="h-2" />
                 </div>
@@ -217,7 +231,7 @@ export function PlagiarismCheckButton({ submission }: PlagiarismCheckButtonProps
                     <div key={index} className="p-4 rounded-lg border bg-card">
                       <div className="flex items-center justify-between">
                         <span className="font-medium text-sm">Submission by: {match.studentName}</span>
-                        <Badge variant={match.similarity >= 0.7 ? "destructive" : "secondary"}>
+                        <Badge variant={getBadgeVariant(match.similarity * 100)}>
                           {(match.similarity * 100).toFixed(1)}% match
                         </Badge>
                       </div>

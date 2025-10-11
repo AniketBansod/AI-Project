@@ -28,7 +28,7 @@ interface Submission {
   content: string
   createdAt: string // ✅ RENAMED from submittedAt
   grade?: number | null
-  feedback?: string
+  feedback?: string | null
   student: {
     id: string
     name: string

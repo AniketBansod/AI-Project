@@ -6,6 +6,7 @@ import { Analytics } from "@vercel/analytics/next"
 import "./globals.css"
 import { Toaster } from "@/components/ui/toaster"
 import { Suspense } from "react"
+import { ThemeProvider } from "@/components/shared/theme-provider"
 
 const geistSans = GeistSans.variable
 const geistMono = GeistMono.variable
@@ -22,13 +23,15 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body className={`${geistSans} ${geistMono} antialiased`}>
-        <Suspense fallback={null}>
-          {children}
-          <Toaster />
-        </Suspense>
-        <Analytics />
+        <ThemeProvider>
+          <Suspense fallback={null}>
+            {children}
+            <Toaster />
+          </Suspense>
+          <Analytics />
+        </ThemeProvider>
       </body>
     </html>
   )

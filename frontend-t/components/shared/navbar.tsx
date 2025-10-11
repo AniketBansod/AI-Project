@@ -12,17 +12,20 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
-import { LogOut } from "lucide-react"
+import { LogOut, User, Sun, Moon } from "lucide-react"
+import { toggleTheme } from "./theme-provider"
 
 export function Navbar() {
   const router = useRouter()
   const [userName, setUserName] = useState("")
+  const [userRole, setUserRole] = useState<string>("")
 
   useEffect(() => {
     const user = localStorage.getItem("user")
     if (user) {
       const userData = JSON.parse(user)
       setUserName(userData.name)
+      setUserRole((userData.role || "").toString())
     }
   }, [])
 
@@ -45,10 +48,18 @@ export function Navbar() {
       .slice(0, 2);
   };
 
+  const handleHomeClick = () => {
+    const isTeacher = userRole?.toUpperCase() === "TEACHER"
+    // If later you add distinct pages, change these targets accordingly
+    const teacherTarget = "/dashboard"
+    const studentTarget = "/dashboard"
+    router.push(isTeacher ? teacherTarget : studentTarget)
+  }
+
   return (
     <nav className="border-b border-border/50 bg-card/50 backdrop-blur-sm sticky top-0 z-50">
       <div className="container mx-auto px-4 h-16 flex items-center justify-between">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 cursor-pointer select-none" onClick={handleHomeClick} role="button" aria-label="Go to dashboard">
           <div className="h-9 w-9 rounded-lg bg-primary/10 flex items-center justify-center">
             <svg className="h-5 w-5 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path
@@ -59,10 +70,17 @@ export function Navbar() {
               />
             </svg>
           </div>
-          <h1 className="text-xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
+          <h1 className="hidden sm:block text-xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent truncate max-w-[50vw]">
             AI Classroom
           </h1>
         </div>
+
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="icon" aria-label="Toggle theme" onClick={toggleTheme} className="h-10 w-10">
+            <Sun className="h-5 w-5 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
+            <Moon className="absolute h-5 w-5 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
+            <span className="sr-only">Toggle theme</span>
+          </Button>
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -82,12 +100,18 @@ export function Navbar() {
               </div>
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => router.push("/dashboard/profile")} className="cursor-pointer">
+              <User className="mr-2 h-4 w-4" />
+              <span>Profile</span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem onClick={handleLogout} className="text-destructive focus:text-destructive cursor-pointer">
               <LogOut className="mr-2 h-4 w-4" />
               <span>Log out</span>
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        </div>
       </div>
     </nav>
   )

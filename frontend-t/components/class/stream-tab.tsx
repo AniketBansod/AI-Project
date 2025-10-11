@@ -158,14 +158,14 @@ export function StreamTab({ classId, posts, isTeacher, onUpdate }: StreamTabProp
         posts.map((post) => (
           <Card key={post.id} className="bg-card/50 backdrop-blur-sm">
             <CardHeader>
-              <div className="flex items-start gap-4">
-                <Avatar className="h-10 w-10 border-2 border-primary/20">
+              <div className="flex items-start gap-3 sm:gap-4">
+                <Avatar className="h-9 w-9 sm:h-10 sm:w-10 border-2 border-primary/20">
                   <AvatarFallback className="bg-primary/10 text-primary font-semibold">
                     {getInitials(post.author.name)}
                   </AvatarFallback>
                 </Avatar>
                 <div className="flex-1 space-y-2">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className="font-semibold">{post.author.name}</span>
                     <span className="text-sm text-muted-foreground">
                       {formatDistanceToNow(new Date(post.createdAt), { addSuffix: true })}
@@ -177,16 +177,16 @@ export function StreamTab({ classId, posts, isTeacher, onUpdate }: StreamTabProp
             </CardHeader>
             <CardContent className="space-y-4">
               {post.comments.length > 0 && (
-                <div className="space-y-3 pl-4 border-l-2 border-border">
+                <div className="space-y-3 pl-3 sm:pl-4 border-l-2 border-border">
                   {post.comments.map((comment) => (
-                    <div key={comment.id} className="flex items-start gap-3">
-                      <Avatar className="h-8 w-8 border border-border">
+                    <div key={comment.id} className="flex items-start gap-2 sm:gap-3">
+                      <Avatar className="h-7 w-7 sm:h-8 sm:w-8 border border-border">
                         <AvatarFallback className="bg-muted text-xs font-semibold">
                           {getInitials(comment.author.name)}
                         </AvatarFallback>
                       </Avatar>
                       <div className="flex-1 space-y-1">
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <span className="text-sm font-medium">{comment.author.name}</span>
                           <span className="text-xs text-muted-foreground">
                             {formatDistanceToNow(new Date(comment.createdAt), { addSuffix: true })}

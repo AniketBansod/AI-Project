@@ -39,8 +39,8 @@ interface AssignmentData {
     id: string
     fileUrl: string
     submittedAt: string
-    grade?: number
-    feedback?: string
+    grade?: number | null
+    feedback?: string | null
   }
 }
 
@@ -176,7 +176,10 @@ export default function AssignmentPage() {
   // Determine the current state for conditional rendering
   const isOverdue = isPast(new Date(assignment.deadline))
   const hasSubmission = !!assignment.submission
-  const isGraded = hasSubmission && assignment.submission?.grade !== undefined
+  const isGraded =
+    hasSubmission &&
+    assignment.submission?.grade !== undefined &&
+    assignment.submission?.grade !== null
 
   return (
     <div className="min-h-screen bg-background">

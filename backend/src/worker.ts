@@ -5,6 +5,8 @@ import IORedis from 'ioredis';
 import axios from 'axios';
 import prisma from './utils/prisma';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import http from 'http';
+import https from 'https';
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://127.0.0.1:8000';
@@ -15,7 +17,8 @@ if (!S3_BUCKET) {
   console.warn('⚠️  S3_BUCKET not set. Highlighted PDF upload to S3 will fail.');
 }
 
-const connection = new IORedis(REDIS_URL, { maxRetriesPerRequest: null });
+const isTls = REDIS_URL.startsWith('rediss://');
+const connection = new IORedis(REDIS_URL, { maxRetriesPerRequest: null, tls: isTls ? {} : undefined });
 const s3 = new S3Client({ region: AWS_REGION });
 
 interface JobData {
@@ -29,6 +32,11 @@ interface AiResult {
   ai_probability: number;
   matches: { submission_id: string; similarity: number }[];
 }
+
+// Keep-alive HTTP agents for axios
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50 });
+const httpClient = axios.create({ httpAgent, httpsAgent, timeout: 15 * 60 * 1000 } as any);
 
 console.log('🚀 Worker started, listening on queue "plagiarism-checks"...');
 
@@ -54,7 +62,9 @@ const worker = new Worker<JobData>(
     // 1️⃣ Call AI service /check
     let aiResult: AiResult | null = null;
     try {
-      const resp = await axios.post<AiResult>(
+      // small retry loop for AI service
+      const postCheck = async () => {
+        return await httpClient.post<AiResult>(
         `${AI_SERVICE_URL}/check`,
         {
           submission_id: submission.id,
@@ -62,9 +72,25 @@ const worker = new Worker<JobData>(
           text_content: submission.content,
           file_url: submission.fileUrl,
         },
-        { timeout: 15 * 60 * 1000 } // 15-minute timeout safety
-      );
-      aiResult = resp.data;
+        );
+      };
+      let lastErr: any;
+      for (let attempt = 1; attempt <= Number(process.env.HTTP_RETRIES || 2) + 1; attempt++) {
+        try {
+          const resp = await postCheck();
+          aiResult = resp.data;
+          break;
+        } catch (e) {
+          lastErr = e;
+          if (attempt <= Number(process.env.HTTP_RETRIES || 2)) {
+            const backoff = (Number(process.env.HTTP_BACKOFF_MS || 1500)) * Math.pow(2, attempt - 1);
+            await new Promise(r => setTimeout(r, backoff));
+            continue;
+          }
+          throw e;
+        }
+      }
+      if (!aiResult) throw lastErr || new Error('AI service did not return a result');
       console.log(`✅ Worker: AI check complete for ${submissionId} (similarity=${aiResult.similarity_score.toFixed(3)}, ai_prob=${aiResult.ai_probability.toFixed(3)})`);
     } catch (err) {
       const errorMessage = (err instanceof Error) ? err.message : String(err);
@@ -141,14 +167,14 @@ const worker = new Worker<JobData>(
     if (submission.fileUrl && S3_BUCKET) {
       try {
         console.log(`🖍️ Worker: Requesting highlighted PDF for ${submission.id}`);
-        const resp = await axios.post<ArrayBuffer>(
+        const resp = await httpClient.post<ArrayBuffer>(
           `${AI_SERVICE_URL}/highlight_pdf`,
           {
             file_url: submission.fileUrl,
             submission_id: submission.id,
             assignment_id: submission.assignmentId,
           },
-          { responseType: 'arraybuffer', timeout: 10 * 60 * 1000 }
+          { responseType: 'arraybuffer' }
         );
 
         const buffer = Buffer.from(resp.data);
@@ -175,6 +201,8 @@ const worker = new Worker<JobData>(
   },
   {
     connection,
+  // Default to 1 to avoid race conditions with incremental FAISS indexing
+  concurrency: Number(process.env.WORKER_CONCURRENCY || 1),
     // automatic cleanup to keep Redis small
     removeOnComplete: { age: 3600, count: 1000 }, // keep jobs for 1 hour or last 1000
     removeOnFail: { age: 86400 }, // failed jobs kept 24h
@@ -205,6 +233,7 @@ process.on('SIGINT', async () => {
   console.log('🛑 Worker: shutting down...');
   await worker.close();
   await connection.quit();
+  try { await prisma.$disconnect(); } catch {}
   process.exit(0);
 });
 

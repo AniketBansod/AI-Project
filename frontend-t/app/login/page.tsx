@@ -21,6 +21,10 @@ export default function LoginPage() {
     email: "",
     password: "",
   })
+  const [forgotMode, setForgotMode] = useState(false)
+  const [otpSent, setOtpSent] = useState(false)
+  const [otp, setOtp] = useState("")
+  const [newPassword, setNewPassword] = useState("")
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -57,6 +61,38 @@ export default function LoginPage() {
 
   const togglePasswordVisibility = () => setShowPassword(!showPassword)
 
+  const handleForgotRequest = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setLoading(true)
+    try {
+      await api.post("/auth/password/forgot", { email: formData.email })
+      setOtpSent(true)
+      toast({ title: "OTP sent", description: "Check your email for the 6-digit code." })
+    } catch (error: any) {
+      toast({ title: "Error", description: error.response?.data?.error || "Failed to send OTP.", variant: "destructive" })
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleForgotVerify = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setLoading(true)
+    try {
+      await api.post("/auth/password/reset-verify", { email: formData.email, otp, newPassword })
+      toast({ title: "Password reset", description: "You can now sign in with your new password." })
+      // reset state and go back to sign in
+      setOtp("")
+      setNewPassword("")
+      setOtpSent(false)
+      setForgotMode(false)
+    } catch (error: any) {
+      toast({ title: "Error", description: error.response?.data?.error || "Failed to reset password.", variant: "destructive" })
+    } finally {
+      setLoading(false)
+    }
+  }
+
   return (
     <div className="min-h-screen flex items-center justify-center bg-zinc-50 dark:bg-zinc-900 p-4">
       <Card className="w-full max-w-md border-zinc-200 dark:border-zinc-800 shadow-lg dark:bg-zinc-950/50">
@@ -77,6 +113,7 @@ export default function LoginPage() {
           <CardDescription className="text-balance text-zinc-500 dark:text-zinc-400">Sign in to your AI Classroom account</CardDescription>
         </CardHeader>
         <CardContent>
+          {!forgotMode ? (
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
@@ -112,6 +149,11 @@ export default function LoginPage() {
                 {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
               </button>
             </div>
+            <div className="flex justify-end -mt-2">
+              <button type="button" onClick={() => setForgotMode(true)} className="text-xs text-primary hover:underline">
+                Forgot password?
+              </button>
+            </div>
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? (
                 <>
@@ -123,6 +165,68 @@ export default function LoginPage() {
               )}
             </Button>
           </form>
+          ) : (
+          <form onSubmit={otpSent ? handleForgotVerify : handleForgotRequest} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="fp-email">Email</Label>
+              <Input
+                id="fp-email"
+                type="email"
+                placeholder="student@university.edu"
+                value={formData.email}
+                onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                required
+                disabled={loading || otpSent}
+                className="bg-zinc-50/50 dark:bg-zinc-800/50"
+              />
+            </div>
+            {otpSent && (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="otp">OTP</Label>
+                  <Input
+                    id="otp"
+                    type="text"
+                    placeholder="6-digit code"
+                    value={otp}
+                    onChange={(e) => setOtp(e.target.value)}
+                    required
+                    disabled={loading}
+                    className="bg-zinc-50/50 dark:bg-zinc-800/50"
+                  />
+                </div>
+                <div className="space-y-2 relative">
+                  <Label htmlFor="newPassword">New Password</Label>
+                  <Input
+                    id="newPassword"
+                    type="password"
+                    placeholder="••••••••"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    required
+                    disabled={loading}
+                    className="bg-zinc-50/50 dark:bg-zinc-800/50"
+                  />
+                </div>
+              </>
+            )}
+            <div className="flex items-center justify-between">
+              <button type="button" onClick={() => { setForgotMode(false); setOtpSent(false); }} className="text-xs text-muted-foreground hover:underline">
+                Back to sign in
+              </button>
+              <Button type="submit" disabled={loading}>
+                {loading ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    {otpSent ? "Resetting..." : "Sending..."}
+                  </>
+                ) : (
+                  otpSent ? "Reset Password" : "Send OTP"
+                )}
+              </Button>
+            </div>
+          </form>
+          )}
 
           <div className="relative my-6">
             <div className="absolute inset-0 flex items-center">
