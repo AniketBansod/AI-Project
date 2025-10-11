@@ -14,6 +14,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("❌ DATABASE_URL is not set in your .env file!")
 
+# Use the same embedding model everywhere (query + index)
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+
 try:
     # Create connection pool
     db_pool = pool.SimpleConnectionPool(1, 10, dsn=DATABASE_URL)
@@ -22,18 +25,23 @@ try:
     print("✅ Connected to PostgreSQL (Supabase)")
 
     cur = conn.cursor()
-    cur.execute('SELECT id, "submissionId", content FROM "SubmissionChunk"')
+    # Include assignment_id via join so we can filter within the same assignment at query time
+    cur.execute('''
+        SELECT c.id, c."submissionId", s."assignmentId", c.content
+        FROM "SubmissionChunk" c
+        JOIN "Submission" s ON s.id = c."submissionId"
+    ''')
     rows = cur.fetchall()
 
     print(f"📦 Retrieved {len(rows)} chunks from DB")
 
     # Load sentence transformer model
-    model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
+    model = SentenceTransformer(EMBEDDING_MODEL)
 
     # Encode content into vectors
-    texts = [r[2] for r in rows]
+    texts = [r[3] for r in rows]
     vectors = model.encode(texts, convert_to_numpy=True, show_progress_bar=True)
-    metadata = [{"chunk_id": r[0], "submission_id": r[1]} for r in rows]
+    metadata = [{"chunk_id": r[0], "submission_id": r[1], "assignment_id": r[2]} for r in rows]
 
     # Build and save vector index
     index = VectorIndex()

@@ -6,6 +6,7 @@ import sys
 import io
 import json
 import traceback
+import uuid
 
 # make sure we can import modules stored under backend/src (vector_index, etc.)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))  # ai-service/tasks/.. -> ai-service
@@ -33,6 +34,12 @@ try:
     from backend.src.vector_index import VectorIndex
 except Exception:
     VectorIndex = None
+
+# Try to import faiss for proper L2 normalization; fallback to numpy if unavailable
+try:
+    import faiss  # type: ignore
+except Exception:
+    faiss = None
 
 try:
     from bm25_cache import get_or_build_bm25
@@ -67,6 +74,47 @@ except Exception:
     def shared_task(*a, **k):
         def deco(f): return f
         return deco
+
+# Optional DB lookup for submission -> assignment mapping when FAISS meta lacks assignment_id
+_SUB_ASSIGN_CACHE: dict[str, str] = {}
+def _get_db_conn():
+    try:
+        import psycopg2
+        from psycopg2 import pool
+        db_url = os.getenv("DATABASE_URL")
+        if not db_url:
+            return None
+        # keep a single connection (simple and sufficient for this service)
+        conn = getattr(_get_db_conn, "_conn", None)
+        if conn is None or conn.closed:
+            conn = psycopg2.connect(dsn=db_url)
+            setattr(_get_db_conn, "_conn", conn)
+        return conn
+    except Exception:
+        return None
+
+def get_assignment_for_submission(submission_id: str) -> str | None:
+    if not submission_id:
+        return None
+    if submission_id in _SUB_ASSIGN_CACHE:
+        return _SUB_ASSIGN_CACHE[submission_id]
+    conn = _get_db_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute('SELECT "assignmentId" FROM "Submission" WHERE id = %s LIMIT 1', (submission_id,))
+        row = cur.fetchone()
+        cur.close()
+        if row and row[0]:
+            _SUB_ASSIGN_CACHE[submission_id] = row[0]
+            return row[0]
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    return None
 
 
 def _debug(msg, *args):
@@ -179,19 +227,64 @@ def run_check(submission_id, assignment_id=None, text_content=None, file_url=Non
                         q_emb = np.expand_dims(q_emb, axis=0)
 
                     q_emb = q_emb.astype("float32")
-                    faiss.normalize_L2(q_emb)
+                    try:
+                        if faiss is not None:
+                            faiss.normalize_L2(q_emb)
+                        else:
+                            q_emb /= (np.linalg.norm(q_emb, axis=1, keepdims=True) + 1e-12)
+                    except Exception as ne:
+                        _debug("Normalization failed: {}", ne)
 
                     _debug("Encoded query shape {} dtype={}", q_emb.shape, q_emb.dtype)
 
-                    # 🧭 Search the FAISS index
-                    D, I = vi.index.search(q_emb, top_k)
+                    # Ensure query embedding dimension matches the FAISS index dimension
+                    try:
+                        index_dim = getattr(vi.index, 'd', None)
+                    except Exception:
+                        index_dim = None
+                    if index_dim is not None and q_emb.shape[1] != index_dim:
+                        _debug("⚠️ Query dim {} != index dim {}. Adapting...", q_emb.shape[1], index_dim)
+                        if q_emb.shape[1] > index_dim:
+                            q_emb = q_emb[:, :index_dim]
+                        else:
+                            import numpy as np
+                            pad = np.zeros((q_emb.shape[0], index_dim - q_emb.shape[1]), dtype=q_emb.dtype)
+                            q_emb = np.concatenate([q_emb, pad], axis=1)
+                        _debug("➡️ Adapted query shape {}", q_emb.shape)
+
+                    # 🧭 Search the FAISS index with broader K, then filter by assignment and dedupe
+                    search_k = max(top_k * 10, 30)
+                    D, I = vi.index.search(q_emb, search_k)
                     _debug("FAISS search results: D={}, I={}", D.tolist(), I.tolist())
 
+                    # Filter results to same assignment; exclude self; dedupe by best score
+                    best_by_sid: dict[str, float] = {}
+                    filtered = 0
                     for dist, idx in zip(D[0], I[0]):
-                        if idx < len(vi.meta):
-                            sim = float(1 - dist)
-                            sid = vi.meta[idx].get("submission_id", f"id_{idx}")
-                            candidates.append({"submission_id": sid, "score": sim})
+                        if idx >= len(vi.meta):
+                            continue
+                        meta = vi.meta[idx] or {}
+                        sid = meta.get("submission_id", f"id_{idx}")
+                        if sid == submission_id:
+                            # exclude self-match
+                            continue
+                        cand_assign = meta.get("assignment_id")
+                        if assignment_id:
+                            if not cand_assign:
+                                cand_assign = get_assignment_for_submission(sid)
+                            if cand_assign != assignment_id:
+                                filtered += 1
+                                continue
+                        # Robust similarity from L2 distance
+                        try:
+                            sim = 1.0 / (1.0 + float(dist))
+                        except Exception:
+                            sim = 0.0
+                        if sid not in best_by_sid or sim > best_by_sid[sid]:
+                            best_by_sid[sid] = sim
+                    # Keep top by score after filtering
+                    candidates = sorted(({"submission_id": s, "score": sc} for s, sc in best_by_sid.items()), key=lambda x: x["score"], reverse=True)[:top_k]
+                    _debug("FAISS candidates after filtering (same assignment, no self): {} ({} filtered out)", len(candidates), filtered)
 
                     _debug("FAISS candidates found: {}", len(candidates))
                 else:
@@ -204,37 +297,21 @@ def run_check(submission_id, assignment_id=None, text_content=None, file_url=Non
         # 📚 Step 3: BM25 / S3 fallback
         # ----------------------------
         if not candidates:
-            _debug("No FAISS results; trying fallback (BM25/S3).")
+            _debug("No FAISS results; considering fallback (BM25/S3).")
+            # To enforce assignment-only comparisons, we disable BM25/S3 fallback unless we have a per-assignment corpus.
+            # This avoids cross-assignment false positives when it's the first submission.
             try:
-                if get_or_build_bm25:
+                if get_or_build_bm25 and assignment_id:
                     bm25_obj, meta = get_or_build_bm25(assignment_id, {})
-                    if bm25_obj and meta:
-                        _debug("BM25 fallback meta entries: {}", len(meta.get("docs", [])))
+                    if bm25_obj and meta and meta.get("tokenized_docs"):
+                        _debug("BM25 fallback available with per-assignment corpus (not implemented scoring here).")
+                    else:
+                        _debug("BM25 fallback skipped: no per-assignment corpus.")
             except Exception as e:
-                _debug("get_or_build_bm25 failed: {}", e)
+                _debug("BM25 fallback error: {}", e)
 
-        if not candidates:
-            s3_bucket = os.getenv("AWS_S3_BUCKET_NAME") or os.getenv("S3_BUCKET_NAME")
-            if s3_bucket and boto3:
-                try:
-                    s3 = boto3.client("s3")
-                    resp = s3.list_objects_v2(Bucket=s3_bucket, Prefix=f"{assignment_id or ''}")
-                    items = resp.get("Contents", [])[:50]
-                    best = []
-                    for obj in items:
-                        key = obj["Key"]
-                        if "highlighted/" in key:
-                            continue
-                        o = s3.get_object(Bucket=s3_bucket, Key=key)
-                        other_text = extract_text_from_pdf_bytes(o["Body"].read())
-                        score = jaccard_char_trigrams(text, other_text)
-                        best.append((key, score))
-                    best.sort(key=lambda x: x[1], reverse=True)
-                    for k, s in best[:top_k]:
-                        candidates.append({"submission_id": k, "score": float(s)})
-                    _debug("S3 fallback compared {} objects, found {} candidates", len(best), len(candidates))
-                except Exception as e:
-                    _debug("S3 scanning fallback failed: {}", e)
+        # We disable S3 fallback when assignment_id is provided to avoid cross-assignment noise.
+        # If you later encode assignment_id into S3 keys or metadata, we can re-enable with strict filtering.
 
         # ----------------------------
         # 🎯 Step 4: Fusion scoring
@@ -254,7 +331,87 @@ def run_check(submission_id, assignment_id=None, text_content=None, file_url=Non
             _debug("No candidates found; returning similarity 0.0")
 
         # ----------------------------
-        # ✅ Step 5: Final result
+        # 🧱 Step 5: Incremental index update (so the NEXT submission can match this one)
+        # ----------------------------
+        try:
+            if VectorIndex is not None and assignment_id:
+                vi_upd = VectorIndex()
+                vi_upd.load()
+                # Only add if this submission_id is not already indexed
+                already = any((m.get("submission_id") == submission_id) for m in (vi_upd.meta or []))
+                if not already:
+                    # simple chunking by words
+                    def _chunk_text(t: str, size_w: int, overlap_w: int):
+                        words = (t or "").split()
+                        chunks = []
+                        i = 0
+                        n = len(words)
+                        while i < n:
+                            chunk = " ".join(words[i:i+size_w])
+                            if chunk.strip():
+                                chunks.append(chunk)
+                            if i + size_w >= n:
+                                break
+                            i += max(1, size_w - overlap_w)
+                        return chunks
+
+                    size_w = int(os.getenv("CHUNK_SIZE_WORDS", "250") or 250)
+                    overlap_w = int(os.getenv("CHUNK_OVERLAP_WORDS", "50") or 50)
+                    chunks = _chunk_text(text, size_w, overlap_w)
+
+                    # Encode with the model matched to index dim
+                    import numpy as np
+                    vecs = vi_upd.model.encode(chunks, convert_to_numpy=True)
+                    if vecs.ndim == 1:
+                        vecs = np.expand_dims(vecs, axis=0)
+                    vecs = vecs.astype("float32")
+                    # adapt dims if needed
+                    try:
+                        index_dim = getattr(vi_upd.index, 'd', None)
+                    except Exception:
+                        index_dim = None
+                    if index_dim is not None and vecs.shape[1] != index_dim:
+                        if vecs.shape[1] > index_dim:
+                            vecs = vecs[:, :index_dim]
+                        else:
+                            pad = np.zeros((vecs.shape[0], index_dim - vecs.shape[1]), dtype=vecs.dtype)
+                            vecs = np.concatenate([vecs, pad], axis=1)
+
+                    # add to index + meta
+                    start_len = len(vi_upd.meta or [])
+                    vi_upd.index.add(vecs)
+                    if vi_upd.meta is None:
+                        vi_upd.meta = []
+                    for _ in range(len(chunks)):
+                        vi_upd.meta.append({"submission_id": submission_id, "assignment_id": assignment_id})
+                    vi_upd.save()
+                    _debug("Incremental FAISS add: +{} vectors for submission {} (meta size {} -> {})",
+                           len(chunks), submission_id, start_len, len(vi_upd.meta))
+
+                    # Also persist chunks to DB so future full re-ingest includes them
+                    try:
+                        import psycopg2
+                        db_url = os.getenv("DATABASE_URL")
+                        if db_url:
+                            conn = psycopg2.connect(dsn=db_url)
+                            cur = conn.cursor()
+                            # Only insert if no rows for this submission
+                            cur.execute('SELECT 1 FROM "SubmissionChunk" WHERE "submissionId" = %s LIMIT 1', (submission_id,))
+                            exists = cur.fetchone()
+                            if not exists:
+                                for idx, c in enumerate(chunks):
+                                    gen_id = str(uuid.uuid4())
+                                    cur.execute('INSERT INTO "SubmissionChunk" (id, content, "submissionId", chunk_index) VALUES (%s, %s, %s, %s)', (gen_id, c, submission_id, idx))
+                                conn.commit()
+                            cur.close()
+                            conn.close()
+                    except Exception as dbe:
+                        _debug("DB chunk insert failed: {}", dbe)
+        except Exception as upde:
+            _debug("Incremental indexing failed: {}", upde)
+
+        # ----------------------------
+        # ✅ Step 6: Final result
         # ----------------------------
         return {
             "similarity_score": float(best_similarity),
@@ -276,16 +433,198 @@ def generate_highlighted_pdf(file_url, submission_id=None, assignment_id=None):
             return b""
         doc = fitz.open(stream=b, filetype="pdf")
         text_all = "\n".join(p.get_text("text") for p in doc)
-        words = [w.lower() for w in text_all.split() if len(w) > 3]
-        from collections import Counter
-        top_words = [w for w,_ in Counter(words).most_common(5)]
-        for page in doc:
-            for w in top_words:
-                for inst in page.search_for(w):
-                    page.add_highlight_annot(inst)
+
+        # Colors
+        YELLOW = (1.0, 1.0, 0.0)          # copied
+        ORANGE = (1.0, 0.647, 0.0)        # AI-generated
+        LIGHT_RED = (1.0, 0.6, 0.6)       # both copied + AI
+
+        # Helper: add colored highlight for phrase occurrences across pages
+        def highlight_phrases(phrases, color):
+            if not phrases:
+                return 0
+            count = 0
+            # Limit to avoid excessive annotations
+            max_annots = 200
+            for page in doc:
+                for ph in phrases:
+                    try:
+                        # Try multiple case variants to improve hit rate
+                        variants = [ph, ph.title(), ph.upper()]
+                        rects = []
+                        for v in variants:
+                            rects = page.search_for(v, quads=False)
+                            if rects:
+                                break
+                    except Exception:
+                        rects = []
+                    for r in rects:
+                        ann = page.add_highlight_annot(r)
+                        try:
+                            ann.set_colors(stroke=color)
+                            ann.update()
+                        except Exception:
+                            pass
+                        count += 1
+                        if count >= max_annots:
+                            return count
+            return count
+
+        # Helper: sentence split
+        def split_sentences(t: str):
+            import re
+            # naive split on .!? while keeping reasonable length
+            sents = re.split(r"(?<=[\.!?])\s+", t)
+            return [s.strip() for s in sents if len(s.strip()) > 0]
+
+        # Helper: overlapping n-grams
+        def overlapping_ngrams(a: str, b: str, n: int = 5, limit: int = 30):
+            import re
+            ta = re.findall(r"\w+", (a or "").lower())
+            tb = re.findall(r"\w+", (b or "").lower())
+            def ngrams(toks):
+                return [" ".join(toks[i:i+n]) for i in range(0, max(0, len(toks)-n+1))]
+            ng_a = set(ngrams(ta))
+            ng_b = set(ngrams(tb))
+            inter = [x for x in ng_a & ng_b if len(x) > 10]
+            # prefer longer/rarer phrases first
+            inter.sort(key=lambda x: (-len(x), x))
+            return inter[:limit]
+
+        # Optional: DB lookup to get fileUrl by submission id
+        def get_submission_file_url(sub_id: str) -> str | None:
+            if not sub_id:
+                return None
+            try:
+                import psycopg2
+                db_url = os.getenv("DATABASE_URL")
+                if not db_url:
+                    return None
+                conn = psycopg2.connect(dsn=db_url)
+                cur = conn.cursor()
+                cur.execute('SELECT "fileUrl" FROM "Submission" WHERE id = %s LIMIT 1', (sub_id,))
+                row = cur.fetchone()
+                cur.close()
+                conn.close()
+                return row[0] if row and row[0] else None
+            except Exception:
+                return None
+
+        total_ai = 0
+        total_copy = 0
+        total_both = 0
+        phrases = []
+
+        # 1) Copied plagiarism highlights (YELLOW): compare with best in-assignment match and mark overlapping 5-grams
+        if assignment_id and submission_id and VectorIndex is not None:
+            try:
+                vi = VectorIndex()
+                vi.load()
+                import numpy as np
+                q = vi.model.encode([text_all], convert_to_numpy=True).astype("float32")
+                # adapt dims
+                index_dim = getattr(vi.index, 'd', None)
+                if index_dim is not None and q.shape[1] != index_dim:
+                    if q.shape[1] > index_dim:
+                        q = q[:, :index_dim]
+                    else:
+                        pad = np.zeros((q.shape[0], index_dim - q.shape[1]), dtype=q.dtype)
+                        q = np.concatenate([q, pad], axis=1)
+                # broader search then filter
+                D, I = vi.index.search(q, 50)
+                best_sid = None
+                for dist, idx in zip(D[0], I[0]):
+                    if idx >= len(vi.meta):
+                        continue
+                    meta = vi.meta[idx] or {}
+                    sid = meta.get("submission_id")
+                    if not sid or sid == submission_id:
+                        continue
+                    cand_assign = meta.get("assignment_id")
+                    if not cand_assign:
+                        cand_assign = get_assignment_for_submission(sid)
+                    if cand_assign == assignment_id:
+                        best_sid = sid
+                        break
+                if best_sid:
+                    other_url = get_submission_file_url(best_sid)
+                    if other_url:
+                        other_b = fetch_via_http(other_url) or fetch_via_s3(other_url)
+                        if other_b:
+                            other_doc = fitz.open(stream=other_b, filetype="pdf")
+                            other_text = "\n".join(p.get_text("text") for p in other_doc)
+                            copy_phrases = overlapping_ngrams(text_all, other_text, n=5, limit=40)
+                            # We'll compute AI phrases below, then intersect.
+                            phrases = copy_phrases
+                            _debug("Found {} overlapping phrases vs submission {}", len(copy_phrases), best_sid)
+            except Exception as ce:
+                _debug("Copied-highlight step failed: {}", ce)
+
+        # 2) AI-generated highlights (ORANGE): high-probability sentences
+        try:
+            AI_THRESH = float(os.getenv("AI_SENTENCE_THRESHOLD", os.getenv("AI_THRESHOLD", "0.7")))
+            sents = split_sentences(text_all)
+            # limit to avoid heavy inference
+            max_sents = min(len(sents), 200)
+            ai_phrases = []
+            for s in sents[:max_sents]:
+                try:
+                    p = float(detect_ai_probability(s))
+                except Exception:
+                    p = 0.0
+                if p >= AI_THRESH and len(s) > 20:
+                    ai_phrases.append(s[:200])  # truncate to keep search efficient
+            # If we also have copy phrases, compute intersection: copied phrase contained within an AI sentence
+            combined_phrases = []
+            if phrases:
+                pl = [p.lower() for p in phrases]
+                for s in ai_phrases:
+                    sl = s.lower()
+                    for p in pl:
+                        if p in sl:
+                            combined_phrases.append(p)
+                # unique
+                combined_phrases = list(dict.fromkeys(combined_phrases))
+
+            # Highlight combined (both) first in light red
+            if combined_phrases:
+                total_both = highlight_phrases(combined_phrases, LIGHT_RED)
+                _debug("Highlighted {} combined (light red)", total_both)
+
+            # Then highlight remaining copied-only (yellow)
+            if phrases:
+                copy_only = []
+                if combined_phrases:
+                    cset = set(combined_phrases)
+                    for p in phrases:
+                        if p.lower() not in cset:
+                            copy_only.append(p)
+                else:
+                    copy_only = phrases
+                if copy_only:
+                    total_copy = highlight_phrases(copy_only, YELLOW)
+                    _debug("Highlighted {} copied-only (yellow)", total_copy)
+
+            # Finally, highlight AI-only sentences (orange)
+            if ai_phrases:
+                if combined_phrases:
+                    cset = set(combined_phrases)
+                    ai_only = []
+                    for s in ai_phrases:
+                        if not any(p in s.lower() for p in cset):
+                            ai_only.append(s)
+                else:
+                    ai_only = ai_phrases
+                if ai_only:
+                    total_ai = highlight_phrases(ai_only, ORANGE)
+                    _debug("Highlighted {} AI-only (orange)", total_ai)
+        except Exception as ae:
+            _debug("AI-highlight step failed: {}", ae)
+
+        # If there are no reasons to highlight (no candidates and no AI), return original to avoid misleading marks
         out = io.BytesIO()
         doc.save(out)
-        _debug("Generated highlighted PDF bytes len={}", out.getbuffer().nbytes)
+        _debug("Generated highlighted PDF bytes len={} (ai={}, copy={}, both={})", out.getbuffer().nbytes, total_ai, total_copy, total_both)
         return out.getvalue()
     except Exception as e:
         _debug("generate_highlighted_pdf exception: {}", e)

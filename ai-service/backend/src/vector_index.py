@@ -56,9 +56,45 @@ class VectorIndex:
             self.index = faiss.read_index(self.index_path)
             with open(self.meta_path, "rb") as f:
                 self.meta = pickle.load(f)
+            dim = getattr(self.index, 'd', None)
             print(f"✅ Loaded FAISS meta ({len(self.meta)} entries)")
-            print(f"🔍 Loading embedding model: {self.model_name}")
-            self.model = SentenceTransformer(self.model_name)
+            if dim is not None:
+                print(f"� FAISS index dimension: {dim}")
+            # Try to load an embedding model whose output dimension matches the FAISS index.
+            # Start with configured model; if mismatch, try common fallbacks.
+            def _model_dim(mname: str) -> int | None:
+                try:
+                    m = SentenceTransformer(mname)
+                    v = m.encode(["dimension-check"], convert_to_numpy=True)
+                    return int(v.shape[1]) if v.ndim == 2 else None
+                except Exception:
+                    return None
+
+            print(f"�🔍 Loading embedding model: {self.model_name}")
+            chosen_model = self.model_name
+            wanted = dim
+            have = _model_dim(chosen_model)
+            if wanted is not None and have is not None and have != wanted:
+                print(f"⚠️ Embedding dim mismatch: model '{chosen_model}' -> {have} vs index {wanted}. Trying fallbacks…")
+                fallbacks = [
+                    "sentence-transformers/all-MiniLM-L6-v2",    # 384
+                    "sentence-transformers/all-MiniLM-L12-v2",   # 384
+                    "sentence-transformers/all-mpnet-base-v2",   # 768
+                    "sentence-transformers/multi-qa-mpnet-base-dot-v1",  # 768
+                    "sentence-transformers/paraphrase-MiniLM-L6-v2",     # 384
+                ]
+                # Ensure env-configured model is first in the list to check (already checked), then try others.
+                for cand in fallbacks:
+                    if cand == chosen_model:
+                        continue
+                    d2 = _model_dim(cand)
+                    if d2 is not None and wanted is not None and d2 == wanted:
+                        chosen_model = cand
+                        print(f"✅ Selected fallback embedding model '{chosen_model}' (dim={d2}) to match FAISS index")
+                        break
+            # Load the chosen model
+            self.model = SentenceTransformer(chosen_model)
+            self.model_name = chosen_model
         else:
             raise FileNotFoundError(f"❌ Missing FAISS index or meta at {self.index_path} / {self.meta_path}")
 
@@ -78,6 +114,7 @@ class VectorIndex:
                 if idx < len(self.meta):
                     row.append({
                         "submission_id": self.meta[idx].get("submission_id", f"id_{idx}"),
+                        "assignment_id": self.meta[idx].get("assignment_id"),
                         "similarity": float(1 - dist)
                     })
             results.append(row)
