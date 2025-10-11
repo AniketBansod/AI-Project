@@ -7,6 +7,8 @@ import io
 import json
 import traceback
 import uuid
+import time
+from collections import OrderedDict
 
 # make sure we can import modules stored under backend/src (vector_index, etc.)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))  # ai-service/tasks/.. -> ai-service
@@ -14,11 +16,18 @@ SYS_EXTRA = os.path.join(PROJECT_ROOT, "backend", "src")
 if SYS_EXTRA not in sys.path:
     sys.path.append(SYS_EXTRA)
 
-# common libs
-try:
-    import fitz  # PyMuPDF
-except Exception:
-    fitz = None
+# common libs (lazy)
+fitz = None  # PyMuPDF, loaded lazily
+def _get_fitz():
+    global fitz
+    if fitz is not None:
+        return fitz
+    try:
+        import fitz as _fitz  # type: ignore
+        fitz = _fitz
+    except Exception:
+        fitz = None
+    return fitz
 
 try:
     import requests
@@ -31,9 +40,9 @@ except Exception:
     boto3 = None
 
 try:
-    from backend.src.vector_index import VectorIndex
+    from backend.src.vector_index import get_vector_index
 except Exception:
-    VectorIndex = None
+    get_vector_index = None
 
 # Try to import faiss for proper L2 normalization; fallback to numpy if unavailable
 try:
@@ -68,15 +77,43 @@ try:
 except Exception:
     def detect_ai_probability(text): return 0.0
 
-try:
-    from celery import shared_task
-except Exception:
-    def shared_task(*a, **k):
-        def deco(f): return f
-        return deco
+# Celery is no longer used. Keep code self-contained without task decorators.
 
 # Optional DB lookup for submission -> assignment mapping when FAISS meta lacks assignment_id
 _SUB_ASSIGN_CACHE: dict[str, str] = {}
+
+class _TTLCache:
+    def __init__(self, max_size=256, ttl_sec=900):
+        self.max_size = max_size
+        self.ttl_sec = ttl_sec
+        self.store = OrderedDict()
+
+    def get(self, key):
+        now = time.time()
+        item = self.store.get(key)
+        if not item:
+            return None
+        exp, val = item
+        if exp < now:
+            try:
+                del self.store[key]
+            except Exception:
+                pass
+            return None
+        self.store.move_to_end(key)
+        return val
+
+    def set(self, key, val):
+        now = time.time()
+        self.store[key] = (now + self.ttl_sec, val)
+        self.store.move_to_end(key)
+        while len(self.store) > self.max_size:
+            try:
+                self.store.popitem(last=False)
+            except Exception:
+                break
+
+_small_cache = _TTLCache(max_size=256, ttl_sec=900)
 def _get_db_conn():
     try:
         import psycopg2
@@ -96,6 +133,9 @@ def _get_db_conn():
 def get_assignment_for_submission(submission_id: str) -> str | None:
     if not submission_id:
         return None
+    hit = _small_cache.get(("sub_assign", submission_id))
+    if hit is not None:
+        return hit
     if submission_id in _SUB_ASSIGN_CACHE:
         return _SUB_ASSIGN_CACHE[submission_id]
     conn = _get_db_conn()
@@ -108,6 +148,7 @@ def get_assignment_for_submission(submission_id: str) -> str | None:
         cur.close()
         if row and row[0]:
             _SUB_ASSIGN_CACHE[submission_id] = row[0]
+            _small_cache.set(("sub_assign", submission_id), row[0])
             return row[0]
     except Exception:
         try:
@@ -125,10 +166,11 @@ def _debug(msg, *args):
 
 
 def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
-    if not fitz:
+    f = _get_fitz()
+    if not f:
         return ""
     try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        doc = f.open(stream=pdf_bytes, filetype="pdf")
         return "\n".join(p.get_text("text") for p in doc)
     except Exception as e:
         _debug("extract_text_from_pdf_bytes failed: {}", e)
@@ -209,84 +251,104 @@ def run_check(submission_id, assignment_id=None, text_content=None, file_url=Non
         candidates = []
 
         # ----------------------------
-        # 🔍 Step 2: FAISS Search
+        # 🔍 Step 2: FAISS Search (with assignment pre-filter)
         # ----------------------------
         try:
-            if VectorIndex is not None:
-                vi = VectorIndex()
-                vi.load()
+            if get_vector_index is not None:
+                vi = get_vector_index()
 
                 if getattr(vi, "index", None) is not None and getattr(vi, "meta", None):
                     _debug("✅ FAISS index loaded with {} meta entries", len(vi.meta))
 
-                    import numpy as np
+                    # Pre-filter: if assignment_id is provided, ensure there are entries for this assignment
+                    skip_faiss = False
+                    if assignment_id:
+                        # Tiny in-process cache to count entries per assignment
+                        key = ("assign_count", assignment_id)
+                        cnt = _small_cache.get(key)
+                        # IMPORTANT: Don't trust cached zero; recompute to avoid stale 0 after incremental add
+                        if cnt is None or cnt == 0:
+                            try:
+                                cnt = sum(1 for m in (vi.meta or []) if (m or {}).get("assignment_id") == assignment_id)
+                            except Exception:
+                                cnt = 0
+                            # Only cache positive counts; avoid caching zero to prevent stale skips
+                            if cnt > 0:
+                                _small_cache.set(key, cnt)
+                        if cnt == 0:
+                            _debug("No entries for assignment {} in FAISS meta; skipping search.", assignment_id)
+                            candidates = []
+                            skip_faiss = True  # cleanly skip without raising
 
-                    # 🧩 Encode and normalize embedding
-                    q_emb = vi.model.encode([text], convert_to_numpy=True)
-                    if q_emb.ndim == 1:
-                        q_emb = np.expand_dims(q_emb, axis=0)
+                    if not skip_faiss:
+                        import numpy as np
 
-                    q_emb = q_emb.astype("float32")
-                    try:
-                        if faiss is not None:
-                            faiss.normalize_L2(q_emb)
-                        else:
-                            q_emb /= (np.linalg.norm(q_emb, axis=1, keepdims=True) + 1e-12)
-                    except Exception as ne:
-                        _debug("Normalization failed: {}", ne)
+                        # 🧩 Encode and normalize embedding
+                        q_emb = vi.encode([text])
+                        if q_emb.ndim == 1:
+                            q_emb = np.expand_dims(q_emb, axis=0)
 
-                    _debug("Encoded query shape {} dtype={}", q_emb.shape, q_emb.dtype)
-
-                    # Ensure query embedding dimension matches the FAISS index dimension
-                    try:
-                        index_dim = getattr(vi.index, 'd', None)
-                    except Exception:
-                        index_dim = None
-                    if index_dim is not None and q_emb.shape[1] != index_dim:
-                        _debug("⚠️ Query dim {} != index dim {}. Adapting...", q_emb.shape[1], index_dim)
-                        if q_emb.shape[1] > index_dim:
-                            q_emb = q_emb[:, :index_dim]
-                        else:
-                            import numpy as np
-                            pad = np.zeros((q_emb.shape[0], index_dim - q_emb.shape[1]), dtype=q_emb.dtype)
-                            q_emb = np.concatenate([q_emb, pad], axis=1)
-                        _debug("➡️ Adapted query shape {}", q_emb.shape)
-
-                    # 🧭 Search the FAISS index with broader K, then filter by assignment and dedupe
-                    search_k = max(top_k * 10, 30)
-                    D, I = vi.index.search(q_emb, search_k)
-                    _debug("FAISS search results: D={}, I={}", D.tolist(), I.tolist())
-
-                    # Filter results to same assignment; exclude self; dedupe by best score
-                    best_by_sid: dict[str, float] = {}
-                    filtered = 0
-                    for dist, idx in zip(D[0], I[0]):
-                        if idx >= len(vi.meta):
-                            continue
-                        meta = vi.meta[idx] or {}
-                        sid = meta.get("submission_id", f"id_{idx}")
-                        if sid == submission_id:
-                            # exclude self-match
-                            continue
-                        cand_assign = meta.get("assignment_id")
-                        if assignment_id:
-                            if not cand_assign:
-                                cand_assign = get_assignment_for_submission(sid)
-                            if cand_assign != assignment_id:
-                                filtered += 1
-                                continue
-                        # Robust similarity from L2 distance
+                        q_emb = q_emb.astype("float32")
                         try:
-                            sim = 1.0 / (1.0 + float(dist))
-                        except Exception:
-                            sim = 0.0
-                        if sid not in best_by_sid or sim > best_by_sid[sid]:
-                            best_by_sid[sid] = sim
-                    # Keep top by score after filtering
-                    candidates = sorted(({"submission_id": s, "score": sc} for s, sc in best_by_sid.items()), key=lambda x: x["score"], reverse=True)[:top_k]
-                    _debug("FAISS candidates after filtering (same assignment, no self): {} ({} filtered out)", len(candidates), filtered)
+                            if faiss is not None:
+                                faiss.normalize_L2(q_emb)
+                            else:
+                                q_emb /= (np.linalg.norm(q_emb, axis=1, keepdims=True) + 1e-12)
+                        except Exception as ne:
+                            _debug("Normalization failed: {}", ne)
 
-                    _debug("FAISS candidates found: {}", len(candidates))
+                        _debug("Encoded query shape {} dtype={}", q_emb.shape, q_emb.dtype)
+
+                        # Ensure query embedding dimension matches the FAISS index dimension
+                        try:
+                            index_dim = getattr(vi.index, 'd', None)
+                        except Exception:
+                            index_dim = None
+                        if index_dim is not None and q_emb.shape[1] != index_dim:
+                            _debug("⚠️ Query dim {} != index dim {}. Adapting...", q_emb.shape[1], index_dim)
+                            if q_emb.shape[1] > index_dim:
+                                q_emb = q_emb[:, :index_dim]
+                            else:
+                                import numpy as np
+                                pad = np.zeros((q_emb.shape[0], index_dim - q_emb.shape[1]), dtype=q_emb.dtype)
+                                q_emb = np.concatenate([q_emb, pad], axis=1)
+                            _debug("➡️ Adapted query shape {}", q_emb.shape)
+
+                        # 🧭 Search the FAISS index with broader K, then filter by assignment and dedupe
+                        search_k = max(top_k * 10, 30)
+                        D, I = vi.index.search(q_emb, search_k)
+                        _debug("FAISS search results: D={}, I={}", D.tolist(), I.tolist())
+
+                        # Filter results to same assignment; exclude self; dedupe by best score
+                        best_by_sid: dict[str, float] = {}
+                        filtered = 0
+                        for dist, idx in zip(D[0], I[0]):
+                            if idx >= len(vi.meta):
+                                continue
+                            meta = vi.meta[idx] or {}
+                            sid = meta.get("submission_id", f"id_{idx}")
+                            if sid == submission_id:
+                                # exclude self-match
+                                continue
+                            cand_assign = meta.get("assignment_id")
+                            if assignment_id:
+                                if not cand_assign:
+                                    cand_assign = get_assignment_for_submission(sid)
+                                if cand_assign != assignment_id:
+                                    filtered += 1
+                                    continue
+                            # Robust similarity from L2 distance
+                            try:
+                                sim = 1.0 / (1.0 + float(dist))
+                            except Exception:
+                                sim = 0.0
+                            if sid not in best_by_sid or sim > best_by_sid[sid]:
+                                best_by_sid[sid] = sim
+                        # Keep top by score after filtering
+                        candidates = sorted(({"submission_id": s, "score": sc} for s, sc in best_by_sid.items()), key=lambda x: x["score"], reverse=True)[:top_k]
+                        _debug("FAISS candidates after filtering (same assignment, no self): {} ({} filtered out)", len(candidates), filtered)
+
+                        _debug("FAISS candidates found: {}", len(candidates))
                 else:
                     _debug("FAISS index not loaded or meta missing.")
         except Exception as e:
@@ -334,14 +396,18 @@ def run_check(submission_id, assignment_id=None, text_content=None, file_url=Non
         # 🧱 Step 5: Incremental index update (so the NEXT submission can match this one)
         # ----------------------------
         try:
-            if VectorIndex is not None and assignment_id:
-                vi_upd = VectorIndex()
-                vi_upd.load()
+            if get_vector_index is not None and assignment_id:
+                vi_upd = get_vector_index()
                 # Only add if this submission_id is not already indexed
                 already = any((m.get("submission_id") == submission_id) for m in (vi_upd.meta or []))
                 if not already:
                     # simple chunking by words
                     def _chunk_text(t: str, size_w: int, overlap_w: int):
+                        # cache chunking by text hash to avoid recompute
+                        key = ("chunks", hash(t), size_w, overlap_w)
+                        cached = _small_cache.get(key)
+                        if cached is not None:
+                            return cached
                         words = (t or "").split()
                         chunks = []
                         i = 0
@@ -353,6 +419,7 @@ def run_check(submission_id, assignment_id=None, text_content=None, file_url=Non
                             if i + size_w >= n:
                                 break
                             i += max(1, size_w - overlap_w)
+                        _small_cache.set(key, chunks)
                         return chunks
 
                     size_w = int(os.getenv("CHUNK_SIZE_WORDS", "250") or 250)
@@ -361,10 +428,18 @@ def run_check(submission_id, assignment_id=None, text_content=None, file_url=Non
 
                     # Encode with the model matched to index dim
                     import numpy as np
-                    vecs = vi_upd.model.encode(chunks, convert_to_numpy=True)
+                    vecs = vi_upd.encode(chunks)
                     if vecs.ndim == 1:
                         vecs = np.expand_dims(vecs, axis=0)
                     vecs = vecs.astype("float32")
+                    # normalize
+                    try:
+                        if faiss is not None:
+                            faiss.normalize_L2(vecs)
+                        else:
+                            vecs /= (np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-12)
+                    except Exception:
+                        pass
                     # adapt dims if needed
                     try:
                         index_dim = getattr(vi_upd.index, 'd', None)
@@ -384,6 +459,14 @@ def run_check(submission_id, assignment_id=None, text_content=None, file_url=Non
                         vi_upd.meta = []
                     for _ in range(len(chunks)):
                         vi_upd.meta.append({"submission_id": submission_id, "assignment_id": assignment_id})
+                    # Update the per-assignment count cache now that we've added entries
+                    try:
+                        key = ("assign_count", assignment_id)
+                        new_cnt = sum(1 for m in (vi_upd.meta or []) if (m or {}).get("assignment_id") == assignment_id)
+                        if new_cnt > 0:
+                            _small_cache.set(key, new_cnt)
+                    except Exception:
+                        pass
                     vi_upd.save()
                     _debug("Incremental FAISS add: +{} vectors for submission {} (meta size {} -> {})",
                            len(chunks), submission_id, start_len, len(vi_upd.meta))
@@ -429,9 +512,10 @@ def generate_highlighted_pdf(file_url, submission_id=None, assignment_id=None):
     try:
         _debug("generate_highlighted_pdf called file_url={}", file_url)
         b = fetch_via_http(file_url) or fetch_via_s3(file_url)
-        if not b or not fitz:
+        f = _get_fitz()
+        if not b or not f:
             return b""
-        doc = fitz.open(stream=b, filetype="pdf")
+        doc = f.open(stream=b, filetype="pdf")
         text_all = "\n".join(p.get_text("text") for p in doc)
 
         # Colors
@@ -516,12 +600,18 @@ def generate_highlighted_pdf(file_url, submission_id=None, assignment_id=None):
         phrases = []
 
         # 1) Copied plagiarism highlights (YELLOW): compare with best in-assignment match and mark overlapping 5-grams
-        if assignment_id and submission_id and VectorIndex is not None:
+        if assignment_id and submission_id and get_vector_index is not None:
             try:
-                vi = VectorIndex()
-                vi.load()
+                vi = get_vector_index()
                 import numpy as np
-                q = vi.model.encode([text_all], convert_to_numpy=True).astype("float32")
+                q = vi.encode([text_all]).astype("float32")
+                try:
+                    if faiss is not None:
+                        faiss.normalize_L2(q)
+                    else:
+                        q /= (np.linalg.norm(q, axis=1, keepdims=True) + 1e-12)
+                except Exception:
+                    pass
                 # adapt dims
                 index_dim = getattr(vi.index, 'd', None)
                 if index_dim is not None and q.shape[1] != index_dim:
@@ -551,7 +641,7 @@ def generate_highlighted_pdf(file_url, submission_id=None, assignment_id=None):
                     if other_url:
                         other_b = fetch_via_http(other_url) or fetch_via_s3(other_url)
                         if other_b:
-                            other_doc = fitz.open(stream=other_b, filetype="pdf")
+                            other_doc = f.open(stream=other_b, filetype="pdf")
                             other_text = "\n".join(p.get_text("text") for p in other_doc)
                             copy_phrases = overlapping_ngrams(text_all, other_text, n=5, limit=40)
                             # We'll compute AI phrases below, then intersect.
@@ -631,8 +721,8 @@ def generate_highlighted_pdf(file_url, submission_id=None, assignment_id=None):
         return b""
 
 
-@shared_task(bind=True)
-def process_submission_task(self, submission_id, assignment_id, file_url=None):
+def process_submission_task(submission_id, assignment_id, file_url=None):
+    """Direct-call wrapper maintained for compatibility; no background queue."""
     res = run_check(submission_id, assignment_id, None, file_url)
     pdf = generate_highlighted_pdf(file_url, submission_id, assignment_id)
     return {"submission_id": submission_id, "result": res, "highlighted_pdf": bool(pdf)}

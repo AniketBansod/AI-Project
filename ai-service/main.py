@@ -2,6 +2,7 @@
 """
 FastAPI app for AI-Powered Plagiarism Detection (Direct-call Integration)
 Compatible with Node backend using /check and /highlight_pdf endpoints.
+Background worker (Celery) integration has been removed to reduce memory usage.
 """
 
 import os
@@ -9,8 +10,6 @@ from fastapi import FastAPI, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from dotenv import load_dotenv
-from worker import celery
-from celery.result import AsyncResult
 from ai_detector import detect_ai_probability
 
 load_dotenv()
@@ -91,29 +90,3 @@ async def highlight_pdf_endpoint(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate PDF: {e}")
 
-
-# ---------------------------
-# Task-based endpoints (optional)
-# ---------------------------
-
-@app.post("/api/submit-task")
-async def submit_task(submission_id: str, assignment_id: str, file_url: str):
-    """Start Celery background task."""
-    from tasks.plagiarism_tasks import process_submission_task
-    task = process_submission_task.delay(submission_id, assignment_id, file_url)
-    return {"task_id": task.id, "status": "queued"}
-
-
-@app.get("/api/task-status/{task_id}")
-async def task_status(task_id: str):
-    """Check Celery task status."""
-    result = AsyncResult(task_id, app=celery)
-    if result.state == "PENDING":
-        return {"state": "PENDING"}
-    elif result.state == "PROGRESS":
-        return {"state": "PROGRESS", "progress": result.info.get("progress", 0)}
-    elif result.state == "SUCCESS":
-        return {"state": "SUCCESS", "result": result.result}
-    elif result.state == "FAILURE":
-        return {"state": "FAILURE", "error": str(result.info)}
-    return {"state": result.state}

@@ -2,10 +2,14 @@
 
 import os
 import pickle
-import faiss
-from sentence_transformers import SentenceTransformer
+try:
+    import faiss  # type: ignore
+except Exception:
+    faiss = None  # Will error at build/search if missing
 import numpy as np
 from dotenv import load_dotenv
+import time
+from collections import OrderedDict
 
 # Load environment variables
 load_dotenv()
@@ -24,14 +28,116 @@ class VectorIndex:
     # ---------- 🧠 Embedding + Build ----------
     def encode(self, texts):
         """Convert text chunks into embeddings."""
+        # Normalize input to list
+        single = False
+        if isinstance(texts, str):
+            texts = [texts]
+            single = True
+
+        # Tiny in-process TTL LRU cache for embeddings
+        vecs = self._encode_with_cache(texts)
+        return vecs[0] if single else vecs
+
+    # --- internal helpers ---
+    _embed_cache = None  # type: ignore
+
+    @staticmethod
+    def _get_embed_cache(max_size: int = 256, ttl_sec: int = 900):
+        # Simple TTL LRU cache: OrderedDict of key -> (expire_ts, np.array)
+        if VectorIndex._embed_cache is None:
+            class _TTLCache:
+                def __init__(self, max_size, ttl_sec):
+                    self.max_size = max_size
+                    self.ttl_sec = ttl_sec
+                    self.store = OrderedDict()
+
+                def get(self, key):
+                    now = time.time()
+                    item = self.store.get(key)
+                    if not item:
+                        return None
+                    exp, val = item
+                    if exp < now:
+                        try:
+                            del self.store[key]
+                        except Exception:
+                            pass
+                        return None
+                    # refresh LRU
+                    self.store.move_to_end(key)
+                    return val
+
+                def set(self, key, val):
+                    now = time.time()
+                    self.store[key] = (now + self.ttl_sec, val)
+                    self.store.move_to_end(key)
+                    # evict
+                    while len(self.store) > self.max_size:
+                        try:
+                            self.store.popitem(last=False)
+                        except Exception:
+                            break
+
+            VectorIndex._embed_cache = _TTLCache(max_size, ttl_sec)
+        return VectorIndex._embed_cache
+
+    def _encode_with_cache(self, texts: list[str]) -> np.ndarray:
         if self.model is None:
+            # Lazy import and initialize only when first used
+            from sentence_transformers import SentenceTransformer  # local import to avoid heavy import at module load
             self.model = SentenceTransformer(self.model_name)
-        return np.array(self.model.encode(texts, convert_to_numpy=True, show_progress_bar=False), dtype=np.float32)
+        cache = self._get_embed_cache()
+        # Check cache per text
+        misses_idx = []
+        cached_rows = {}
+        for i, t in enumerate(texts):
+            key = f"{self.model_name}:{t}"
+            v = cache.get(key)
+            if v is None:
+                misses_idx.append(i)
+            else:
+                cached_rows[i] = v
+
+        # Encode misses in batch
+        enc = None
+        if misses_idx:
+            miss_texts = [texts[i] for i in misses_idx]
+            enc = self.model.encode(miss_texts, convert_to_numpy=True, show_progress_bar=False)
+            if enc.ndim == 1:
+                enc = np.expand_dims(enc, axis=0)
+            enc = enc.astype(np.float32, copy=False)
+            # store
+            for j, i in enumerate(misses_idx):
+                key = f"{self.model_name}:{texts[i]}"
+                cache.set(key, enc[j])
+
+        # Assemble in original order
+        out = []
+        miss_ptr = 0
+        for i in range(len(texts)):
+            if i in cached_rows:
+                out.append(cached_rows[i])
+            else:
+                out.append(enc[miss_ptr])
+                miss_ptr += 1
+        return np.array(out, dtype=np.float32)
 
     def build_index(self, vectors, metadata):
         """Build FAISS index from vectors + metadata."""
+        if faiss is None:
+            raise ImportError("faiss-cpu is required to build the vector index. Please install it.")
         if not isinstance(vectors, np.ndarray):
             vectors = np.array(vectors, dtype=np.float32)
+        else:
+            vectors = vectors.astype(np.float32, copy=False)
+
+        # L2-normalize embeddings so L2 distance approximates cosine distance
+        try:
+            import faiss as _faiss
+            _faiss.normalize_L2(vectors)
+        except Exception:
+            norms = np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-12
+            vectors = vectors / norms
 
         dim = vectors.shape[1]
         self.index = faiss.IndexFlatL2(dim)
@@ -50,51 +156,18 @@ class VectorIndex:
 
     # ---------- 📦 Load + Search ----------
     def load(self):
-        """Load FAISS index, metadata, and embedding model."""
+        """Load FAISS index and metadata only (no model). Model is loaded lazily on first encode()."""
         if os.path.exists(self.index_path) and os.path.exists(self.meta_path):
             print(f"✅ FAISS index loaded from {self.index_path}")
+            if faiss is None:
+                raise ImportError("faiss-cpu is required to load the vector index. Please install it.")
             self.index = faiss.read_index(self.index_path)
             with open(self.meta_path, "rb") as f:
                 self.meta = pickle.load(f)
             dim = getattr(self.index, 'd', None)
             print(f"✅ Loaded FAISS meta ({len(self.meta)} entries)")
             if dim is not None:
-                print(f"� FAISS index dimension: {dim}")
-            # Try to load an embedding model whose output dimension matches the FAISS index.
-            # Start with configured model; if mismatch, try common fallbacks.
-            def _model_dim(mname: str) -> int | None:
-                try:
-                    m = SentenceTransformer(mname)
-                    v = m.encode(["dimension-check"], convert_to_numpy=True)
-                    return int(v.shape[1]) if v.ndim == 2 else None
-                except Exception:
-                    return None
-
-            print(f"�🔍 Loading embedding model: {self.model_name}")
-            chosen_model = self.model_name
-            wanted = dim
-            have = _model_dim(chosen_model)
-            if wanted is not None and have is not None and have != wanted:
-                print(f"⚠️ Embedding dim mismatch: model '{chosen_model}' -> {have} vs index {wanted}. Trying fallbacks…")
-                fallbacks = [
-                    "sentence-transformers/all-MiniLM-L6-v2",    # 384
-                    "sentence-transformers/all-MiniLM-L12-v2",   # 384
-                    "sentence-transformers/all-mpnet-base-v2",   # 768
-                    "sentence-transformers/multi-qa-mpnet-base-dot-v1",  # 768
-                    "sentence-transformers/paraphrase-MiniLM-L6-v2",     # 384
-                ]
-                # Ensure env-configured model is first in the list to check (already checked), then try others.
-                for cand in fallbacks:
-                    if cand == chosen_model:
-                        continue
-                    d2 = _model_dim(cand)
-                    if d2 is not None and wanted is not None and d2 == wanted:
-                        chosen_model = cand
-                        print(f"✅ Selected fallback embedding model '{chosen_model}' (dim={d2}) to match FAISS index")
-                        break
-            # Load the chosen model
-            self.model = SentenceTransformer(chosen_model)
-            self.model_name = chosen_model
+                print(f"🔢 FAISS index dimension: {dim}")
         else:
             raise FileNotFoundError(f"❌ Missing FAISS index or meta at {self.index_path} / {self.meta_path}")
 
@@ -115,7 +188,8 @@ class VectorIndex:
                     row.append({
                         "submission_id": self.meta[idx].get("submission_id", f"id_{idx}"),
                         "assignment_id": self.meta[idx].get("assignment_id"),
-                        "similarity": float(1 - dist)
+                        # With L2-normalized vectors, use a stable mapping from L2 distance to similarity
+                        "similarity": float(1.0 / (1.0 + float(dist)))
                     })
             results.append(row)
         return results

@@ -15,6 +15,7 @@ if not DATABASE_URL:
     raise ValueError("❌ DATABASE_URL is not set in your .env file!")
 
 # Use the same embedding model everywhere (query + index)
+# Standardize: single light model with 384-dim
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
 try:
@@ -41,6 +42,14 @@ try:
     # Encode content into vectors
     texts = [r[3] for r in rows]
     vectors = model.encode(texts, convert_to_numpy=True, show_progress_bar=True)
+    vectors = vectors.astype(np.float32, copy=False)
+    # Normalize to unit length to align with L2-based cosine approximation
+    try:
+        import faiss as _faiss  # type: ignore
+        _faiss.normalize_L2(vectors)
+    except Exception:
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-12
+        vectors = vectors / norms
     metadata = [{"chunk_id": r[0], "submission_id": r[1], "assignment_id": r[2]} for r in rows]
 
     # Build and save vector index

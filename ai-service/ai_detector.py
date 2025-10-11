@@ -32,13 +32,37 @@ CHUNK_SIZE_WORDS = int(os.getenv("CHUNK_SIZE_WORDS", "250"))
 CHUNK_OVERLAP_WORDS = int(os.getenv("CHUNK_OVERLAP_WORDS", "50"))
 AI_THRESHOLD = float(os.getenv("AI_THRESHOLD", "0.5"))
 
-# Optional heavy deps
-try:
-    import torch
-    from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM
-    torch_available = True
-except Exception:
-    torch_available = False
+# Optional heavy deps (lazy)
+torch = None
+AutoTokenizer = None
+AutoModelForSequenceClassification = None
+AutoModelForCausalLM = None
+
+_transformers_ready = None  # tri-state: None (unknown), True/False (checked)
+
+def _ensure_transformers() -> bool:
+    """Import torch and transformers lazily; return True if available."""
+    global torch, AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM, _transformers_ready
+    if _transformers_ready is True:
+        return True
+    if _transformers_ready is False:
+        return False
+    try:
+        import torch as _torch
+        from transformers import (
+            AutoTokenizer as _AutoTokenizer,
+            AutoModelForSequenceClassification as _AutoModelForSequenceClassification,
+            AutoModelForCausalLM as _AutoModelForCausalLM,
+        )
+        torch = _torch
+        AutoTokenizer = _AutoTokenizer
+        AutoModelForSequenceClassification = _AutoModelForSequenceClassification
+        AutoModelForCausalLM = _AutoModelForCausalLM
+        _transformers_ready = True
+        return True
+    except Exception:
+        _transformers_ready = False
+        return False
 
 # Redis cache (supports rediss)
 try:
@@ -54,32 +78,58 @@ try:
 except Exception:
     redis_client = None
 
-# Load detectors
-detectors = []  # list of tuples (name, tokenizer, model, device)
-if torch_available:
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    for model_name in DETECTOR_MODELS:
-        try:
-            tok = AutoTokenizer.from_pretrained(model_name)
-            m = AutoModelForSequenceClassification.from_pretrained(model_name).to(device)
-            detectors.append((model_name, tok, m, device))
-            print(f"✅ Loaded detector {model_name} on {device}")
-        except Exception as e:
-            print(f"⚠️ Failed to load detector {model_name}: {e}")
-else:
-    print("⚠️ torch / transformers not available. Falling back to heuristics for AI detection.")
+_detectors = None  # type: Optional[list]
+_device = None
 
-# Optional perplexity model
-ppl_tok = None
-ppl_model = None
-if ENABLE_PERPLEXITY and torch_available:
+def _get_detectors():
+    """Load detector models once and cache them; return list of (name, tok, model, device) or []."""
+    global _detectors, _device
+    if _detectors is not None:
+        return _detectors
+    if not _ensure_transformers():
+        _detectors = []
+        return _detectors
     try:
-        ppl_tok = AutoTokenizer.from_pretrained(PERPLEXITY_MODEL)
-        ppl_model = AutoModelForCausalLM.from_pretrained(PERPLEXITY_MODEL).to(device)
-        print(f"✅ Loaded perplexity model {PERPLEXITY_MODEL}")
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        dets = []
+        for model_name in DETECTOR_MODELS:
+            try:
+                tok = AutoTokenizer.from_pretrained(model_name)
+                m = AutoModelForSequenceClassification.from_pretrained(model_name).to(dev)
+                dets.append((model_name, tok, m, dev))
+                print(f"✅ Loaded detector {model_name} on {dev}")
+            except Exception as e:
+                print(f"⚠️ Failed to load detector {model_name}: {e}")
+        _detectors = dets
+        _device = dev
+        return _detectors
     except Exception as e:
-        ppl_tok = ppl_model = None
+        print(f"⚠️ Detector loading failed: {e}")
+        _detectors = []
+        return _detectors
+
+_ppl_tok = None
+_ppl_model = None
+
+def _get_ppl():
+    """Load perplexity model/tokenizer lazily if enabled; return (tok, model) or (None, None)."""
+    global _ppl_tok, _ppl_model
+    if not ENABLE_PERPLEXITY:
+        return None, None
+    if _ppl_tok is not None and _ppl_model is not None:
+        return _ppl_tok, _ppl_model
+    if not _ensure_transformers():
+        return None, None
+    try:
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        _ppl_tok = AutoTokenizer.from_pretrained(PERPLEXITY_MODEL)
+        _ppl_model = AutoModelForCausalLM.from_pretrained(PERPLEXITY_MODEL).to(dev)
+        print(f"✅ Loaded perplexity model {PERPLEXITY_MODEL} on {dev}")
+        return _ppl_tok, _ppl_model
+    except Exception as e:
+        _ppl_tok = _ppl_model = None
         print("⚠️ Failed to load perplexity model:", e)
+        return None, None
 
 
 def chunk_text_words(text: str, chunk_size: int = CHUNK_SIZE_WORDS, overlap: int = CHUNK_OVERLAP_WORDS) -> List[str]:
@@ -100,12 +150,13 @@ def chunk_text_words(text: str, chunk_size: int = CHUNK_SIZE_WORDS, overlap: int
 
 
 def compute_perplexity(text: str) -> float:
-    if not ppl_model or not ppl_tok:
+    tok, mdl = _get_ppl()
+    if not tok or not mdl:
         return 0.0
     try:
-        enc = ppl_tok(text, return_tensors="pt", truncation=True, max_length=1024).to(ppl_model.device)
+        enc = tok(text, return_tensors="pt", truncation=True, max_length=1024).to(mdl.device)
         with torch.no_grad():
-            loss = ppl_model(**enc, labels=enc["input_ids"]).loss
+            loss = mdl(**enc, labels=enc["input_ids"]).loss
         ppl = float(torch.exp(loss).cpu().item())
         return ppl
     except Exception:
@@ -118,10 +169,11 @@ def _score_with_detectors(text: str) -> List[float]:
     If detectors are not available, returns an empty list.
     """
     scores = []
-    if not detectors:
+    dets = _get_detectors()
+    if not dets:
         return scores
 
-    for name, tok, mdl, device in detectors:
+    for name, tok, mdl, device in dets:
         try:
             inputs = tok(text, truncation=True, max_length=512, return_tensors="pt").to(device)
             with torch.no_grad():
@@ -170,7 +222,8 @@ def detect_ai_probability(text: str) -> float:
             avg_det = None
 
         # perplexity heuristic
-        if ENABLE_PERPLEXITY and ppl_model and ppl_tok:
+        tok_m, mdl_m = _get_ppl()
+        if ENABLE_PERPLEXITY and tok_m and mdl_m:
             ppl = compute_perplexity(chunk)
             ppl_score = 1 - (math.tanh(math.log(ppl + 1) / 10))  # convert perplexity -> approx [0,1]
         else:
