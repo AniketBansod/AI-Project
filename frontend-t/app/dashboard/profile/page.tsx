@@ -12,6 +12,8 @@ import { api } from "@/lib/axios"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Camera, Loader2 } from "lucide-react"
+import { formatApiError } from "@/lib/errors"
+import { AppError } from "@/components/shared/app-error"
 
 interface Me {
   id: string
@@ -30,6 +32,7 @@ export default function ProfilePage() {
   const [uploadingAvatar, setUploadingAvatar] = useState(false)
   const [reqLoading, setReqLoading] = useState(false)
   const [verifyLoading, setVerifyLoading] = useState(false)
+  const [errorState, setErrorState] = useState<{ title: string; message: string; status?: number; fieldErrors?: any; retryable?: boolean } | null>(null)
   const [currentPassword, setCurrentPassword] = useState("")
   const [otp, setOtp] = useState("")
   const [newPassword, setNewPassword] = useState("")
@@ -51,8 +54,11 @@ export default function ProfilePage() {
       const res = await api.get("/api/profile/me")
       setMe(res.data)
       setName(res.data.name || "")
+      setErrorState(null)
     } catch (e: any) {
-      toast({ title: "Error", description: e.response?.data?.error || "Failed to load profile", variant: "destructive" })
+      const fe = formatApiError(e, "Failed to load profile")
+      setErrorState({ title: fe.title, message: fe.message, status: fe.status, fieldErrors: fe.fieldErrors, retryable: fe.retryable })
+      toast({ title: fe.title, description: fe.message, variant: "destructive" })
     } finally {
       setLoading(false)
     }
@@ -76,7 +82,8 @@ export default function ProfilePage() {
       }
       toast({ title: "Saved", description: "Name updated successfully" })
     } catch (e: any) {
-      toast({ title: "Error", description: e.response?.data?.error || "Failed to update name", variant: "destructive" })
+      const fe = formatApiError(e, "Failed to update name")
+      toast({ title: fe.title, description: fe.message, variant: "destructive" })
     } finally {
       setSaving(false)
     }
@@ -110,7 +117,8 @@ export default function ProfilePage() {
       }
       toast({ title: "Profile image updated" })
     } catch (e: any) {
-      toast({ title: "Upload failed", description: e.response?.data?.error || "Could not upload avatar", variant: "destructive" })
+      const fe = formatApiError(e, "Could not upload avatar")
+      toast({ title: fe.title, description: fe.message, variant: "destructive" })
     } finally {
       setUploadingAvatar(false)
     }
@@ -185,6 +193,17 @@ export default function ProfilePage() {
                 <Skeleton className="h-10 col-span-full" />
               </CardContent>
             </Card>
+          </div>
+        ) : errorState ? (
+          <div className="max-w-3xl">
+            <AppError
+              title={errorState.title}
+              message={errorState.message}
+              status={errorState.status}
+              fieldErrors={errorState.fieldErrors}
+              retryable={errorState.retryable}
+              onRetry={() => loadProfile()}
+            />
           </div>
         ) : (
           <>

@@ -13,6 +13,8 @@ import { api } from "../../../lib/axios"
 import { useToast } from "@/hooks/use-toast"
 import { Copy, Check } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { formatApiError } from "@/lib/errors"
+import { AppError } from "@/components/shared/app-error"
 
 interface ClassData {
   id: string
@@ -59,6 +61,7 @@ export default function ClassPage() {
   const { toast } = useToast()
   const [loading, setLoading] = useState(true)
   const [classData, setClassData] = useState<ClassData | null>(null)
+  const [errorState, setErrorState] = useState<{ title: string; message: string; details?: string; status?: number; fieldErrors?: any; retryable?: boolean } | null>(null)
   const [userRole, setUserRole] = useState("") // Use a simple string
   const [copied, setCopied] = useState(false)
   const [tab, setTab] = useState<string>("stream")
@@ -95,12 +98,11 @@ export default function ClassPage() {
     try {
       const response = await api.get(`/api/classes/${params.classId}`)
       setClassData(response.data)
+      setErrorState(null)
     } catch (error: any) {
-      toast({
-        title: "Error",
-        description: error.response?.data?.message || "Failed to load class data.",
-        variant: "destructive",
-      })
+      const fe = formatApiError(error, "Failed to load class data.")
+      setErrorState({ title: fe.title, message: fe.message, status: fe.status, fieldErrors: fe.fieldErrors, retryable: fe.retryable })
+      toast({ title: fe.title, description: fe.message, variant: "destructive" })
     } finally {
       setLoading(false)
     }
@@ -142,10 +144,18 @@ export default function ClassPage() {
       <div className="min-h-screen bg-background">
         <Navbar />
         <main className="container mx-auto px-4 py-8">
-          <div className="text-center py-16">
-            <h2 className="text-2xl font-bold mb-2">Class not found</h2>
-            <p className="text-muted-foreground mb-6">The class you're looking for doesn't exist.</p>
-            <Button onClick={() => router.push("/dashboard")}>Back to Dashboard</Button>
+          <div className="max-w-3xl">
+            <AppError
+              title={errorState?.title || "Class not found"}
+              message={errorState?.message || "The class you're looking for doesn't exist or couldn't be loaded."}
+              status={errorState?.status}
+              fieldErrors={errorState?.fieldErrors}
+              retryable={errorState?.retryable}
+              onRetry={() => fetchClassData()}
+            />
+            <div className="mt-6">
+              <Button onClick={() => router.push("/dashboard")}>Back to Dashboard</Button>
+            </div>
           </div>
         </main>
       </div>
