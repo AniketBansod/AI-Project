@@ -8,6 +8,7 @@ on:
       - 'ai-service/**'
       - 'docker-compose.yml'
       - 'Caddyfile'
+  workflow_dispatch:
 
 jobs:
   build-and-push:
@@ -100,3 +101,13 @@ jobs:
           scp -i key.pem -o StrictHostKeyChecking=no docker-compose.yml Caddyfile $SSH_USER@$SSH_HOST:~/app/
           scp -i key.pem -o StrictHostKeyChecking=no artifacts/backend.env $SSH_USER@$SSH_HOST:~/app/backend/.env
           ssh -i key.pem -o StrictHostKeyChecking=no $SSH_USER@$SSH_HOST "docker login ghcr.io -u '${{ secrets.GHCR_USERNAME }}' -p '${{ secrets.GHCR_TOKEN }}' && cd ~/app && docker compose pull && docker compose up -d --remove-orphans"
+
+      - name: Verify remote state
+        env:
+          SSH_HOST: 4.187.225.54
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+        run: |
+          echo "$SSH_KEY" > key.pem
+          chmod 600 key.pem
+          ssh -i key.pem -o StrictHostKeyChecking=no $SSH_USER@$SSH_HOST "ls -la ~/app; echo '---'; ls -la ~/app/backend || true; docker compose ls || true"
