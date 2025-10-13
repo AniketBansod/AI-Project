@@ -2,7 +2,7 @@
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
-*.py[cod]
+*.pyc
 *$py.class
 
 # C extensions
@@ -61,4 +61,9 @@ htmlcov/
 
 # Docker
 docker-compose.override.yml
+
+# Model/index caches
+backend/src/faiss_index.bin
+backend/src/faiss_meta.pkl
+backend/src/*.pkl
 

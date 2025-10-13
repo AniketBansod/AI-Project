@@ -1,60 +1,43 @@
 # Root .gitignore for the workspace
 
-# Node
+# Env files
+.env
+*.env
+**/.env
+infra/env/
+infra/.env
+
+# Node/Next/TS
 node_modules/
 **/node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-package-lock.json
-pnpm-lock.yaml
-yarn.lock
-
-# Next / React
-.next/
-out/
-build/
 dist/
-
-# Prisma
-.prisma/
-
-# Environment
-.env
-.env.*
-.env.local
-.env.production
-
-# Editor/directories
+build/
+coverage/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
 .vscode/
 .idea/
-.DS_Store
 
-# Logs
-logs/
-*.log
+# Next.js
+.next/
+**/.next/
 
-# Coverage
-coverage/
-.nyc_output/
-
-# Temporary
-tmp/
-temp/
-
-# Python caches (also ignore since repo has python service)
+# Python
 __pycache__/
-*.py[cod]
+**/__pycache__/
+*.pyc
 *.pyo
+.venv/
+venv/
 
-# Misc
-*.tgz
-*.zip
+# AI indices / large artifacts
+ai-service/backend/src/faiss_index.bin
+ai-service/backend/src/faiss_meta.pkl
+ai-service/backend/src/*.pkl
 
-# Docker
-docker-compose.override.yml
-
-# OS files
+# OS
+.DS_Store
 Thumbs.db
 
