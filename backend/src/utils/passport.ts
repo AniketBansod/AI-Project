@@ -1,13 +1,18 @@
-import passport from "passport";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
+import passport from "passport";
 import prisma from "./prisma";
+import { PUBLIC_API_BASE } from "./config";
+
+// Build a public base URL for OAuth callbacks (no trailing slash)
+const GOOGLE_CALLBACK_URL =
+  process.env.GOOGLE_CALLBACK_URL || `${PUBLIC_API_BASE}/auth/google/callback`;
 
 passport.use(
   new GoogleStrategy(
     {
       clientID: process.env.GOOGLE_CLIENT_ID!,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
-      callbackURL: "http://localhost:5000/auth/google/callback",
+      callbackURL: GOOGLE_CALLBACK_URL,
     },
     async (accessToken, refreshToken, profile, done) => {
       try {

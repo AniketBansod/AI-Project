@@ -1,7 +1,8 @@
 import 'dotenv/config';
 import express from "express";
 import cors from "cors";
-import helmet from 'helmet';
+import helmet from "helmet";
+import morgan from "morgan";
 import authRoutes from "./src/routes/authRoutes";
 import { authMiddleware } from "./src/middleware/authMiddleware";
 import passport from "passport";
@@ -17,16 +18,27 @@ import profileRoutes from "./src/routes/profileRoutes";
 import materialRoutes from "./src/routes/materialRoutes";
 
 import prisma from './src/utils/prisma';
+import { CORS_ALLOWED } from "./src/utils/config";
 
 const app = express();
 
-const ALLOWED_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:3000';
-const JSON_LIMIT = process.env.JSON_LIMIT || '1mb';
-
+app.set("trust proxy", 1);
 app.use(helmet());
-app.use(cors({ origin: ALLOWED_ORIGIN, credentials: true }));
-app.use(express.json({ limit: JSON_LIMIT }));
-app.use(passport.initialize());
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
+
+app.use(
+  cors({
+    origin: CORS_ALLOWED.length ? CORS_ALLOWED : true,
+    credentials: true,
+  })
+);
+
+// Health endpoint for Compose/Caddy checks
+app.get("/api/health", (_req, res) => {
+  res.status(200).json({ status: "ok" });
+});
 
 // Health check endpoint
 app.get("/health", (req, res) => {
@@ -75,22 +87,22 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
   res.status(status).json({ error: message });
 });
 
-const PORT = Number(process.env.PORT) || 5000;
-const server = app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+const PORT = Number(process.env.PORT || 5000);
+const server = app.listen(PORT, () => {
+  console.log(`API listening on :${PORT}`);
+});
 
 // Graceful shutdown
 const shutdown = async (signal: string) => {
-  try {
-    console.log(`\n${signal} received: closing HTTP server...`);
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await prisma.$disconnect();
-    console.log('Shutdown complete.');
+  console.log(`Received ${signal}, shutting down...`);
+  server.close(async () => {
+    try {
+      await prisma.$disconnect();
+    } catch (e) {
+      console.error("Prisma disconnect error", e);
+    }
     process.exit(0);
-  } catch (e) {
-    console.error('Error during shutdown', e);
-    process.exit(1);
-  }
+  });
 };
-
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));

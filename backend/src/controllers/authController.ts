@@ -1,8 +1,9 @@
 import { Request, Response } from "express";
 import prisma from "../utils/prisma";
 import { hashPassword, comparePassword, generateToken } from "../utils/auth";
-import { sendEmail, generateVerificationEmailHtml } from "../utils/email"; 
+import { sendEmail, generateVerificationEmailHtml } from "../utils/email";
 import crypto from "crypto";
+import { PUBLIC_APP_BASE } from "../utils/config"; // added
 
 // ... imports
 
@@ -17,10 +18,8 @@ export const register = async (req: Request, res: Response) => {
     const existingUser = await prisma.user.findUnique({ where: { email } });
     if (existingUser) return res.status(400).json({ error: "Email already exists" });
 
-    // --- MODIFIED LINE ---
-    // Use base64url for a URL-safe token
-    const verificationToken = crypto.randomBytes(32).toString("base64url"); 
-    
+    const verificationToken = crypto.randomBytes(32).toString("base64url");
+
     const hashedPassword = await hashPassword(password);
 
     const user = await prisma.user.create({
@@ -33,8 +32,8 @@ export const register = async (req: Request, res: Response) => {
       },
     });
 
-    // The rest of the function remains the same...
-    const verificationUrl = `http://localhost:3000/verify-email/${verificationToken}`;
+    // Build public verification link to the frontend (Vercel domain)
+    const verificationUrl = `${PUBLIC_APP_BASE}/verify-email/${verificationToken}`;
     const emailHtml = generateVerificationEmailHtml(user.name, verificationUrl);
 
     await sendEmail({
@@ -48,7 +47,7 @@ export const register = async (req: Request, res: Response) => {
     console.error(err);
     res.status(500).json({ error: "Registration failed" });
   } finally {
-    await prisma.$disconnect();
+    // Remove prisma.$disconnect() here — handled on process shutdown instead
   }
 };
 
@@ -107,7 +106,7 @@ export const login = async (req: Request, res: Response) => {
     console.error(err);
     res.status(500).json({ error: "Login failed" });
   } finally {
-    await prisma.$disconnect();
+    // no prisma.$disconnect() here
   }
 };
 
@@ -141,12 +140,12 @@ export const verifyEmail = async (req: Request, res: Response) => {
 export const googleCallback = (req: Request, res: Response) => {
   const user = req.user as any;
   if (!user) {
-    return res.redirect("http://localhost:3000/login?error=AuthenticationFailed");
+    return res.redirect(`${PUBLIC_APP_BASE}/login?error=AuthenticationFailed`);
   }
 
   const token = generateToken(user.id, user.role);
-
-  res.redirect(`http://localhost:3000/auth/callback?token=${token}`);
+  // Redirect to frontend app
+  return res.redirect(`${PUBLIC_APP_BASE}/auth/callback?token=${token}`);
 };
 
 export const getMe = async (req: Request, res: Response) => {
