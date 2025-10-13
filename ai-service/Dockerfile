@@ -4,11 +4,19 @@ FROM python:3.11-slim
 # Set workdir
 WORKDIR /app
 
-# Copy requirements (we’ll create requirements.txt)
-COPY requirements.txt .
+# System deps for scientific/python packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    g++ \
+    git \
+    libgl1 \
+    ghostscript \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy and install requirements
+COPY requirements.txt ./
+RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
 # Copy app code
 COPY . .
