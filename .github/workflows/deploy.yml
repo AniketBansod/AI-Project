@@ -41,7 +41,7 @@ jobs:
       # ---------- Build Backend (API) ----------
       - name: Build and push backend image
         run: |
-          docker buildx build \
+          docker buildx build --no-cache --platform linux/amd64 \
             --platform linux/amd64 \
             --file backend/Dockerfile \
             --tag ghcr.io/${{ env.OWNER_LC }}/ai-project-backend:prod-latest \
@@ -52,7 +52,7 @@ jobs:
       # ---------- Build Worker ----------
       - name: Build and push worker image
         run: |
-          docker buildx build \
+          docker buildx build --no-cache --platform linux/amd64 \
             --platform linux/amd64 \
             --file backend/Dockerfile \
             --tag ghcr.io/${{ env.OWNER_LC }}/ai-project-worker:prod-latest \
@@ -63,7 +63,7 @@ jobs:
       # ---------- Build AI Service ----------
       - name: Build and push AI service image
         run: |
-          docker buildx build \
+          docker buildx build --no-cache --platform linux/amd64 \
             --platform linux/amd64 \
             --file ai-service/Dockerfile \
             --tag ghcr.io/${{ env.OWNER_LC }}/ai-service:prod-latest \

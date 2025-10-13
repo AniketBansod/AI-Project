@@ -1,25 +1,26 @@
-# Use official PyTorch CPU image (already includes torch + deps)
-# Note: 2.5.1-cpu tag is not available on Docker Hub; 2.5.0-cpu is.
-FROM pytorch/pytorch:2.3.1-cpu
+# Lightweight CPU-only build for GitHub Actions
+FROM python:3.11-slim
 
-# Set working directory
 WORKDIR /app
 
-# Minimal system deps for FAISS / PyMuPDF rendering
+# Install minimal system deps for scientific + PDF packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
     libgl1 \
     libgomp1 \
     ghostscript \
     curl \
-    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Keep image small
+# Disable pip cache to reduce disk usage
 ENV PIP_NO_CACHE_DIR=1
 RUN python -m pip install --upgrade pip setuptools wheel
 
-# Pre-install heavy binary wheels explicitly
-RUN pip install --no-cache-dir --only-binary=:all: \
+# ✅ Install PyTorch CPU wheel explicitly from official index
+RUN python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.5.0
+
+# ✅ Preinstall heavy binary-only wheels to avoid source compilation
+RUN python -m pip install --only-binary=:all: \
     faiss-cpu==1.8.0 \
     numpy==2.3.3 \
     scipy==1.16.2 \
@@ -27,15 +28,12 @@ RUN pip install --no-cache-dir --only-binary=:all: \
     PyMuPDF==1.26.4 \
     pillow==11.0.0
 
-# Copy requirements and install remaining deps
+# Copy requirements and install the remaining deps
 COPY requirements.txt ./
-RUN pip install --no-cache-dir --no-build-isolation -r requirements.txt
+RUN python -m pip install --no-cache-dir --no-build-isolation -r requirements.txt
 
-# Copy app code
+# Copy your application code
 COPY . .
 
-# Expose FastAPI port
 EXPOSE 8000
-
-# Launch FastAPI server
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
