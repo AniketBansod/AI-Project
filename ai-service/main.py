@@ -31,6 +31,17 @@ async def root():
     return {"status": "ok", "message": "AI Service is running"}
 
 
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready():
+    # Simple readiness probe; extend with model/cache checks if needed
+    return {"status": "ready"}
+
+
 # ---------------------------
 # Direct-call endpoints
 # ---------------------------

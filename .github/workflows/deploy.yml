@@ -20,6 +20,12 @@ jobs:
           username: ${{ secrets.GHCR_USERNAME }}
           password: ${{ secrets.GHCR_TOKEN }}
 
+      # Ensure GHCR namespace is lowercase (GHCR requires lowercase repository names)
+      - name: Compute lowercase owner
+        id: lower-owner
+        run: |
+          echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
       # ---------- Buildx + Cache Setup ----------
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -38,8 +44,8 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             --file backend/Dockerfile \
-            --tag ghcr.io/${{ github.repository_owner }}/ai-project-backend:prod-latest \
-            --tag ghcr.io/${{ github.repository_owner }}/ai-project-backend:${{ github.sha }} \
+            --tag ghcr.io/${{ env.OWNER_LC }}/ai-project-backend:prod-latest \
+            --tag ghcr.io/${{ env.OWNER_LC }}/ai-project-backend:${{ github.sha }} \
             --push \
             backend
 
@@ -49,8 +55,8 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             --file backend/Dockerfile \
-            --tag ghcr.io/${{ github.repository_owner }}/ai-project-worker:prod-latest \
-            --tag ghcr.io/${{ github.repository_owner }}/ai-project-worker:${{ github.sha }} \
+            --tag ghcr.io/${{ env.OWNER_LC }}/ai-project-worker:prod-latest \
+            --tag ghcr.io/${{ env.OWNER_LC }}/ai-project-worker:${{ github.sha }} \
             --push \
             backend
 
@@ -60,8 +66,8 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             --file ai-service/Dockerfile \
-            --tag ghcr.io/${{ github.repository_owner }}/ai-service:prod-latest \
-            --tag ghcr.io/${{ github.repository_owner }}/ai-service:${{ github.sha }} \
+            --tag ghcr.io/${{ env.OWNER_LC }}/ai-service:prod-latest \
+            --tag ghcr.io/${{ env.OWNER_LC }}/ai-service:${{ github.sha }} \
             --push \
             --cache-from type=local,src=/tmp/.buildx-cache \
             --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
@@ -70,8 +76,18 @@ jobs:
       - name: Move buildx cache
         if: always()
         run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          rm -rf /tmp/.buildx-cache || true
+          if [ -d "/tmp/.buildx-cache-new" ]; then mv /tmp/.buildx-cache-new /tmp/.buildx-cache; fi
+
+      # ---------- Copy compose files to VM ----------
+      - name: Upload compose and proxy config
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          source: "docker-compose.yml,Caddyfile"
+          target: "~/app"
 
       # ---------- SSH Deploy ----------
       - name: Deploy to Azure VM
@@ -85,6 +101,8 @@ jobs:
             mkdir -p ~/app
             cd ~/app
             echo "${{ secrets.BACKEND_ENV }}" > backend.env
+            echo "Logging into GHCR on remote..."
+            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
             docker compose pull
             docker compose up -d
             docker image prune -af
