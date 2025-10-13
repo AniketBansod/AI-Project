@@ -1,0 +1,43 @@
+# Root .gitignore for the workspace
+
+# Env files
+.env
+*.env
+**/.env
+infra/env/
+infra/.env
+
+# Node/Next/TS
+node_modules/
+**/node_modules/
+dist/
+build/
+coverage/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+.vscode/
+.idea/
+
+# Next.js
+.next/
+**/.next/
+
+# Python
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# AI indices / large artifacts
+ai-service/backend/src/faiss_index.bin
+ai-service/backend/src/faiss_meta.pkl
+ai-service/backend/src/*.pkl
+
+# OS
+.DS_Store
+Thumbs.db
+
