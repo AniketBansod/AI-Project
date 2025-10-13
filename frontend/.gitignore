@@ -1,8 +1,13 @@
-# Next
+# Next.js
 .next/
 out/
+
 # Node
 node_modules/
-# Env
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Env (no secrets in git)
 .env
-.env.local
+.env.*
