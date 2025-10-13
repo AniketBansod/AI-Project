@@ -5,7 +5,10 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DIRECT_URL")
+  // Use pooled connection for the app (Supabase PgBouncer)
+  url       = env("DATABASE_URL")
+  // Use direct connection for migrations/introspection
+  directUrl = env("DIRECT_URL")
   extensions = [vector] // Add this line
 }
 
