@@ -2,64 +2,50 @@ version: "3.9"
 
 services:
   caddy:
-    image: caddy:2.8.4
+    image: caddy:2
     restart: unless-stopped
     ports:
       - "80:80"
       - "443:443"
     volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data
       - caddy_config:/config
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
 
   api:
-    image: ghcr.io/aniketbansod/ai-project-backend:latest
-    restart: unless-stopped
-    env_file:
-      - ./backend/.env
+    image: ghcr.io/aniketbansod/ai-project-backend:prod-latest
+    env_file: backend.env
     depends_on:
       - ai
+    restart: unless-stopped
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          'node -e "require(''http'').get(''http://localhost:5000/health'', r=>process.exit(r.statusCode===200?0:1)).on(''error'',()=>process.exit(1))"',
-        ]
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
       timeout: 5s
-      retries: 5
+      retries: 3
 
   worker:
-    image: ghcr.io/aniketbansod/ai-project-worker:latest
-    restart: unless-stopped
-    env_file:
-      - ./backend/.env
-    command: ["node", "dist/src/worker.js"]
+    image: ghcr.io/aniketbansod/ai-project-worker:prod-latest
+    env_file: backend.env
     depends_on:
       - api
+      - ai
+    restart: unless-stopped
 
   ai:
-    image: ghcr.io/aniketbansod/ai-project-ai:latest
+    image: ghcr.io/aniketbansod/ai-service:prod-latest
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     volumes:
       - ai_index:/app/backend/src
       - hf_cache:/root/.cache/huggingface
-    env_file:
-      - ./backend/.env
-    environment:
-      - DATABASE_URL=${DIRECT_URL}
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "python - <<'PY'\nimport sys,urllib.request\ntry:\n  with urllib.request.urlopen('http://localhost:8000/', timeout=3) as r:\n    sys.exit(0 if r.status==200 else 1)\nexcept Exception:\n  sys.exit(1)\nPY",
-        ]
-      interval: 30s
-      timeout: 10s
-      retries: 5
 
 volumes:
-  caddy_data:
-  caddy_config:
   ai_index:
   hf_cache:
+  caddy_data:
+  caddy_config:
