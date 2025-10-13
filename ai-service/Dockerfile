@@ -1,6 +1,6 @@
 # Use official PyTorch CPU image (already includes torch + deps)
 # Note: 2.5.1-cpu tag is not available on Docker Hub; 2.5.0-cpu is.
-FROM pytorch/pytorch:2.5.0-cpu
+FROM pytorch/pytorch:2.3.1-cpu
 
 # Set working directory
 WORKDIR /app
