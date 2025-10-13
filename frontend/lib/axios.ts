@@ -1,32 +1,40 @@
 import axios from "axios"
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000"
+// Allow either var name; trim trailing slash
+const RAW_BASE =
+  process.env.NEXT_PUBLIC_API_URL ||
+  process.env.NEXT_PUBLIC_API_BASE ||
+  ""
+const API_BASE_URL = RAW_BASE.replace(/\/$/, "")
 
 export const api = axios.create({
-  baseURL: API_BASE_URL,
-  headers: {
-    "Content-Type": "application/json",
-  },
+  baseURL: API_BASE_URL, // Set to full API base in env, e.g. https://api.<IP>.nip.io/api
+  headers: { "Content-Type": "application/json" },
   withCredentials: true,
 })
 
-// Add token to requests if available
+// Add token to requests if available (browser only)
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("token")
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`
+  if (typeof window !== "undefined") {
+    const token = localStorage.getItem("token")
+    if (token) {
+      config.headers = config.headers ?? {}
+      config.headers.Authorization = `Bearer ${token}`
+    }
   }
   return config
 })
 
-// Handle auth errors
+// Handle auth errors (browser only)
 api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      localStorage.removeItem("token")
-      localStorage.removeItem("user")
-      window.location.href = "/login"
+      if (typeof window !== "undefined") {
+        localStorage.removeItem("token")
+        localStorage.removeItem("user")
+        window.location.href = "/login"
+      }
     }
     return Promise.reject(error)
   },
