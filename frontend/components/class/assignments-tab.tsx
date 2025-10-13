@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { CreateAssignmentDialog } from "../../components/class/create-assignment-dialog"
+import { EditAssignmentDialog } from "../../components/class/edit-assignment-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Calendar, FileText, Search, X } from "lucide-react"
 import { format, isPast } from "date-fns"
@@ -163,9 +164,16 @@ export function AssignmentsTab({ classId, assignments, isTeacher, onUpdate }: As
                       <CardTitle className="text-xl text-balance">{assignment.title}</CardTitle>
                       <CardDescription className="line-clamp-2 text-balance">{assignment.description}</CardDescription>
                     </div>
-                    <Badge variant={isOverdue ? "destructive" : "secondary"} className="shrink-0">
-                      {assignment.points} pts
-                    </Badge>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Badge variant={isOverdue ? "destructive" : "secondary"} className="shrink-0">
+                        {assignment.points} pts
+                      </Badge>
+                      {isTeacher && (
+                        <div onClick={(e) => e.stopPropagation()}>
+                          <EditAssignmentDialog assignment={assignment as any} onUpdated={onUpdate} />
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </CardHeader>
                 <CardContent>

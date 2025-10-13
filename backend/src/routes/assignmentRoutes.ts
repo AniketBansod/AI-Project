@@ -34,5 +34,29 @@ router.get(
   assignmentController.getSubmissionsForAssignment
 );
 
+// GET /api/assignments/:assignmentId/rejected - List rejected submissions
+router.get(
+  "/:assignmentId/rejected",
+  authMiddleware,
+  isTeacher,
+  assignmentController.getRejectedSubmissions
+);
+
+// PUT /api/assignments/:assignmentId - Update assignment
+router.put(
+  "/:assignmentId",
+  authMiddleware,
+  isTeacher,
+  assignmentController.updateAssignment
+);
+
+// DELETE /api/assignments/:assignmentId - Delete assignment
+router.delete(
+  "/:assignmentId",
+  authMiddleware,
+  isTeacher,
+  assignmentController.deleteAssignment
+);
+
 // ... (existing POST route)
 export default router;

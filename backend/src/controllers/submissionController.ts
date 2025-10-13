@@ -186,15 +186,85 @@ export const gradeSubmission = async (req: Request, res: Response) => {
 
     const updatedSubmission = await prisma.submission.update({
       where: { id: submissionId },
-      data: {
+      data: ({
         grade: gradeValue,
         feedback: feedback ?? null,
-      },
+        status: "GRADED",
+      } as any),
     });
 
     res.status(200).json(updatedSubmission);
   } catch (err) {
     console.error("Grading error", err);
     return res.status(500).json({ error: "Failed to grade submission." });
+  }
+};
+
+/**
+ * Reject a submission (teacher) with a note
+ * Route: POST /api/submissions/:submissionId/reject
+ * Body: { note: string }
+ */
+export const rejectSubmission = async (req: Request, res: Response) => {
+  try {
+    const { submissionId } = req.params;
+    const { note } = req.body as { note?: string };
+    const teacherId = (req as any).user.id;
+
+    const submission = await prisma.submission.findFirst({
+      where: { id: submissionId, assignment: { class: { teacherId } } },
+      include: { assignment: true },
+    });
+    if (!submission) return res.status(403).json({ error: "You are not authorized to reject this submission." });
+
+    const updated = await prisma.submission.update({
+      where: { id: submissionId },
+      data: ({
+        status: "REJECTED",
+        rejectionNote: note || null,
+        rejectedAt: new Date(),
+        // clear grade/feedback if previously graded
+        grade: null,
+        feedback: null,
+      } as any),
+    });
+    return res.json(updated);
+  } catch (err) {
+    console.error("rejectSubmission error", err);
+    return res.status(500).json({ error: "Failed to reject submission." });
+  }
+};
+
+/**
+ * Unsubmit (student retracts their submission) — used to resubmit
+ * Route: DELETE /api/submissions/:assignmentId
+ */
+export const unsubmitSubmission = async (req: Request, res: Response) => {
+  try {
+    const { assignmentId } = req.params;
+    const studentId = (req as any).user.id;
+
+    const existing = await prisma.submission.findFirst({
+      where: { assignmentId, studentId },
+      orderBy: { createdAt: "desc" },
+    });
+    if (!existing) return res.status(404).json({ error: "No submission to unsubmit." });
+
+    // Only allow unsubmit if not graded
+    if (existing.grade !== null && existing.grade !== undefined) {
+      return res.status(400).json({ error: "Cannot unsubmit a graded submission." });
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // Delete dependent records first to satisfy FK constraints
+      await tx.plagiarismReport.deleteMany({ where: { submissionId: existing.id } });
+      await tx.submissionChunk.deleteMany({ where: { submissionId: existing.id } });
+      await tx.submissionComment.deleteMany({ where: { submissionId: existing.id } });
+      await tx.submission.delete({ where: { id: existing.id } });
+    });
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("unsubmitSubmission error", err);
+    return res.status(500).json({ error: "Failed to unsubmit." });
   }
 };

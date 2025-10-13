@@ -141,3 +141,75 @@ export const getSubmissionsForAssignment = async (req: Request, res: Response) =
   }
 };
 
+// Update assignment (teacher)
+export const updateAssignment = async (req: Request, res: Response) => {
+  try {
+    const { assignmentId } = req.params;
+    const { title, description, deadline, points } = req.body;
+    const teacherId = (req as any).user.id;
+
+    const assignment = await prisma.assignment.findFirst({
+      where: { id: assignmentId, class: { teacherId } },
+    });
+    if (!assignment) return res.status(403).json({ error: "You are not authorized to update this assignment." });
+
+    const updated = await prisma.assignment.update({
+      where: { id: assignmentId },
+      data: {
+        title: title ?? assignment.title,
+        description: description ?? assignment.description,
+        deadline: deadline ? new Date(deadline) : assignment.deadline,
+        points: points !== undefined ? Number(points) : assignment.points,
+      },
+    });
+    return res.json(updated);
+  } catch (err) {
+    console.error("Error updating assignment:", err);
+    return res.status(500).json({ error: "Failed to update assignment" });
+  }
+};
+
+// Delete assignment (teacher)
+export const deleteAssignment = async (req: Request, res: Response) => {
+  try {
+    const { assignmentId } = req.params;
+    const teacherId = (req as any).user.id;
+
+    const assignment = await prisma.assignment.findFirst({
+      where: { id: assignmentId, class: { teacherId } },
+    });
+    if (!assignment) return res.status(403).json({ error: "You are not authorized to delete this assignment." });
+
+    await prisma.assignment.delete({ where: { id: assignmentId } });
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("Error deleting assignment:", err);
+    return res.status(500).json({ error: "Failed to delete assignment" });
+  }
+};
+
+// List rejected submissions for an assignment (teacher)
+export const getRejectedSubmissions = async (req: Request, res: Response) => {
+  try {
+    const { assignmentId } = req.params;
+    const teacherId = (req as any).user.id;
+
+    const assignment = await prisma.assignment.findFirst({
+      where: { id: assignmentId, class: { teacherId } },
+    });
+    if (!assignment) return res.status(403).json({ error: "You do not have access to this assignment's submissions." });
+
+    const rejected = await prisma.submission.findMany({
+      where: ({ assignmentId, status: "REJECTED" } as any),
+      orderBy: ({ rejectedAt: "desc" } as any),
+      include: {
+        student: { select: { id: true, name: true, email: true } },
+      },
+    });
+    return res.json({ assignmentId, rejected });
+  } catch (err) {
+    console.error("Error fetching rejected submissions:", err);
+    return res.status(500).json({ error: "Failed to fetch rejected submissions" });
+  }
+};
+

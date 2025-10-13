@@ -6,6 +6,9 @@ import { useParams, useRouter } from "next/navigation"
 import { Navbar } from "../../../components/shared/navbar"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
@@ -21,8 +24,10 @@ import {
 } from "@/components/ui/alert-dialog"
 import { api } from "../../../lib/axios"
 import { useToast } from "@/hooks/use-toast"
-import { Calendar, FileText, Loader2, CheckCircle2, Clock, Upload, X, RotateCcw } from "lucide-react"
+import { Calendar, FileText, Loader2, CheckCircle2, Clock, Upload, X, RotateCcw, Ban } from "lucide-react"
 import { format, isPast } from "date-fns"
+import { formatApiError } from "@/lib/errors"
+import { AppError } from "@/components/shared/app-error"
 
 // Define the structure of your assignment and submission data
 interface AssignmentData {
@@ -35,12 +40,23 @@ interface AssignmentData {
     id: string
     title: string
   }
+  resources?: Array<{
+    id: string
+    title: string
+    description?: string
+    type: "ATTACHMENT" | "REFERENCE" | "QUIZ"
+    linkUrl?: string
+    fileUrl?: string
+    createdAt: string
+  }>
   submission?: {
     id: string
     fileUrl: string
-    submittedAt: string
+    createdAt?: string
     grade?: number | null
     feedback?: string | null
+    status?: "SUBMITTED" | "REJECTED" | "GRADED"
+    rejectionNote?: string | null
   }
 }
 
@@ -54,6 +70,16 @@ export default function AssignmentPage() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [assignment, setAssignment] = useState<AssignmentData | null>(null)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [errorState, setErrorState] = useState<{ title: string; message: string } | null>(null)
+  const [resources, setResources] = useState<AssignmentData["resources"]>([])
+  const [isTeacher, setIsTeacher] = useState(false)
+  const [resOpen, setResOpen] = useState(false)
+  const [resTitle, setResTitle] = useState("")
+  const [resDesc, setResDesc] = useState("")
+  const [resType, setResType] = useState<"ATTACHMENT" | "REFERENCE" | "QUIZ">("ATTACHMENT")
+  const [resLink, setResLink] = useState("")
+  const [resFile, setResFile] = useState<File | null>(null)
+  const [resSubmitting, setResSubmitting] = useState(false)
   
   // A ref for the hidden file input to trigger it programmatically
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -65,6 +91,11 @@ export default function AssignmentPage() {
       router.push("/login")
       return
     }
+    const userStr = localStorage.getItem("user")
+    if (userStr) {
+      const u = JSON.parse(userStr)
+      setIsTeacher((u.role || "").toUpperCase() === "TEACHER")
+    }
     fetchAssignment()
   }, [params.assignmentId, router])
 
@@ -74,12 +105,15 @@ export default function AssignmentPage() {
     try {
       const response = await api.get(`/api/assignments/${params.assignmentId}`)
       setAssignment(response.data)
+      try {
+        const list = await api.get(`/api/assignments/${params.assignmentId}/resources`)
+        setResources(list.data || [])
+      } catch {}
+      setErrorState(null)
     } catch (error: any) {
-      toast({
-        title: "Error",
-        description: error.response?.data?.message || "Failed to load assignment.",
-        variant: "destructive",
-      })
+      const fe = formatApiError(error, "Failed to load assignment.")
+      setErrorState({ title: fe.title, message: fe.message })
+      toast({ title: fe.title, description: fe.message, variant: "destructive" })
     } finally {
       setLoading(false)
     }
@@ -112,11 +146,8 @@ export default function AssignmentPage() {
       setSelectedFile(null)
       fetchAssignment() // Refresh data to show the new submission
     } catch (error: any) {
-      toast({
-        title: "Submission Failed",
-        description: error.response?.data?.message || "Could not upload the file.",
-        variant: "destructive",
-      })
+      const fe = formatApiError(error, "Could not upload the file.")
+      toast({ title: fe.title, description: fe.message, variant: "destructive" })
     } finally {
       setIsSubmitting(false)
     }
@@ -133,11 +164,8 @@ export default function AssignmentPage() {
       })
       fetchAssignment() // Refresh data to show the empty submission slot
     } catch (error: any) {
-      toast({
-        title: "Error",
-        description: error.response?.data?.message || "Failed to unsubmit.",
-        variant: "destructive",
-      })
+      const fe = formatApiError(error, "Failed to unsubmit.")
+      toast({ title: fe.title, description: fe.message, variant: "destructive" })
     } finally {
       setIsSubmitting(false)
     }
@@ -162,10 +190,9 @@ export default function AssignmentPage() {
     return (
       <div className="min-h-screen bg-background">
         <Navbar />
-        <main className="container mx-auto px-4 py-8">
-          <div className="text-center py-16">
-            <h2 className="text-2xl font-bold mb-2">Assignment not found</h2>
-            <p className="text-muted-foreground mb-6">The assignment you're looking for doesn't exist.</p>
+        <main className="container mx-auto px-4 py-8 max-w-3xl">
+          <AppError title={errorState?.title || "Assignment not found"} message={errorState?.message || "The assignment you're looking for doesn't exist or couldn't be loaded."} />
+          <div className="mt-6">
             <Button onClick={() => router.push("/dashboard")}>Back to Dashboard</Button>
           </div>
         </main>
@@ -180,6 +207,33 @@ export default function AssignmentPage() {
     hasSubmission &&
     assignment.submission?.grade !== undefined &&
     assignment.submission?.grade !== null
+  const isRejected = hasSubmission && assignment.submission?.status === "REJECTED"
+
+  const submitResource = async () => {
+    setResSubmitting(true)
+    try {
+      const form = new FormData()
+      form.append("title", resTitle)
+      if (resDesc) form.append("description", resDesc)
+      form.append("type", resType)
+      if (resLink) form.append("linkUrl", resLink)
+      if (resFile) form.append("file", resFile)
+      await api.post(`/api/assignments/${params.assignmentId}/resources`, form, { headers: { "Content-Type": "multipart/form-data" } })
+      setResOpen(false)
+      setResTitle("")
+      setResDesc("")
+      setResType("ATTACHMENT")
+      setResLink("")
+      setResFile(null)
+      const list = await api.get(`/api/assignments/${params.assignmentId}/resources`)
+      setResources(list.data || [])
+      toast({ title: "Resource added" })
+    } catch (e: any) {
+      toast({ title: "Error", description: e?.response?.data?.error || "Failed to add resource", variant: "destructive" })
+    } finally {
+      setResSubmitting(false)
+    }
+  }
 
   return (
     <div className="min-h-screen bg-background">
@@ -226,6 +280,26 @@ export default function AssignmentPage() {
                 </CardHeader>
                 <CardContent>
                   <p className="text-sm leading-relaxed text-balance">{assignment.submission.feedback}</p>
+                </CardContent>
+              </Card>
+            )}
+            {/* Rejection notice */}
+            {hasSubmission && isRejected && (
+              <Card className="border-destructive/30 bg-destructive/5">
+                <CardHeader>
+                  <CardTitle className="text-lg flex items-center gap-2 text-destructive">
+                    <Ban className="h-5 w-5" /> Submission Rejected
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <p className="text-sm leading-relaxed text-balance mb-2">Your teacher rejected this submission. Please review the note and resubmit.</p>
+                  {assignment.submission?.rejectionNote && (
+                    <div className="rounded-md bg-destructive/10 p-3 text-sm">
+                      <span className="font-medium">Teacher note: </span>
+                      {assignment.submission.rejectionNote}
+                    </div>
+                  )}
+                  <p className="text-xs text-muted-foreground mt-2">Tip: Unsubmit to remove the rejected file, then upload a corrected document before the deadline.</p>
                 </CardContent>
               </Card>
             )}
@@ -354,6 +428,70 @@ export default function AssignmentPage() {
                       Turn In
                     </Button>
                   </form>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Assignment resources */}
+            <Card className="bg-card/50 backdrop-blur-sm">
+              <CardHeader className="flex flex-row items-center justify-between">
+                <CardTitle className="text-lg">Resources</CardTitle>
+                {isTeacher && (
+                  <Dialog open={resOpen} onOpenChange={setResOpen}>
+                    <DialogTrigger asChild>
+                      <Button size="sm">Add resource</Button>
+                    </DialogTrigger>
+                    <DialogContent>
+                      <DialogHeader>
+                        <DialogTitle>Add assignment resource</DialogTitle>
+                      </DialogHeader>
+                      <div className="space-y-3">
+                        <Input placeholder="Title" value={resTitle} onChange={(e) => setResTitle(e.target.value)} />
+                        <Textarea placeholder="Description (optional)" value={resDesc} onChange={(e) => setResDesc(e.target.value)} />
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <select className="border rounded px-2 py-2 bg-background" value={resType} onChange={(e) => setResType(e.target.value as any)}>
+                            <option value="ATTACHMENT">Attachment</option>
+                            <option value="REFERENCE">Reference</option>
+                            <option value="QUIZ">Quiz</option>
+                          </select>
+                          <Input placeholder="Link URL (optional)" value={resLink} onChange={(e) => setResLink(e.target.value)} />
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Input type="file" onChange={(e) => setResFile(e.target.files?.[0] || null)} />
+                        </div>
+                        <div className="flex justify-end">
+                          <Button onClick={submitResource} disabled={!resTitle || resSubmitting}>
+                            {resSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save"}
+                          </Button>
+                        </div>
+                      </div>
+                    </DialogContent>
+                  </Dialog>
+                )}
+              </CardHeader>
+              <CardContent>
+                {resources && resources.length > 0 ? (
+                  <div className="space-y-2">
+                    {resources.map((r) => (
+                      <div key={r.id} className="flex items-center justify-between rounded border p-3">
+                        <div>
+                          <div className="font-medium">{r.title}</div>
+                          {r.description ? <div className="text-xs text-muted-foreground">{r.description}</div> : null}
+                          <div className="text-xs text-muted-foreground">{r.type}{r.linkUrl ? ` • ${r.linkUrl}` : ""}</div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {r.linkUrl ? (
+                            <Button size="sm" variant="outline" onClick={() => window.open(r.linkUrl!, "_blank")}>Open</Button>
+                          ) : null}
+                          {r.fileUrl ? (
+                            <Button size="sm" variant="outline" onClick={() => window.open(r.fileUrl!, "_blank")}>Download</Button>
+                          ) : null}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No resources attached.</p>
                 )}
               </CardContent>
             </Card>

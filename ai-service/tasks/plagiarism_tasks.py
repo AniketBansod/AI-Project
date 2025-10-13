@@ -82,6 +82,9 @@ except Exception:
 # Optional DB lookup for submission -> assignment mapping when FAISS meta lacks assignment_id
 _SUB_ASSIGN_CACHE: dict[str, str] = {}
 
+# Cache for submission -> student mapping
+_SUB_STUDENT_CACHE: dict[str, str] = {}
+
 class _TTLCache:
     def __init__(self, max_size=256, ttl_sec=900):
         self.max_size = max_size
@@ -156,6 +159,62 @@ def get_assignment_for_submission(submission_id: str) -> str | None:
         except Exception:
             pass
     return None
+
+
+def get_student_for_submission(submission_id: str) -> str | None:
+    """Return the studentId (user id) who made a submission. Cached with TTL."""
+    if not submission_id:
+        return None
+    hit = _small_cache.get(("sub_student", submission_id))
+    if hit is not None:
+        return hit
+    if submission_id in _SUB_STUDENT_CACHE:
+        return _SUB_STUDENT_CACHE[submission_id]
+    conn = _get_db_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute('SELECT "studentId" FROM "Submission" WHERE id = %s LIMIT 1', (submission_id,))
+        row = cur.fetchone()
+        cur.close()
+        if row and row[0]:
+            _SUB_STUDENT_CACHE[submission_id] = row[0]
+            _small_cache.set(("sub_student", submission_id), row[0])
+            return row[0]
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    return None
+
+
+def submission_exists(submission_id: str) -> bool:
+    """Check if a submission row still exists (not deleted)."""
+    if not submission_id:
+        return False
+    key = ("sub_exists", submission_id)
+    hit = _small_cache.get(key)
+    if hit is not None:
+        return bool(hit)
+    conn = _get_db_conn()
+    if not conn:
+        return True  # assume true if no DB connectivity to avoid over-filtering
+    try:
+        cur = conn.cursor()
+        cur.execute('SELECT 1 FROM "Submission" WHERE id = %s LIMIT 1', (submission_id,))
+        row = cur.fetchone()
+        cur.close()
+        exists = bool(row is not None)
+        _small_cache.set(key, exists)
+        return exists
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    return True
 
 
 def _debug(msg, *args):
@@ -337,6 +396,9 @@ def run_check(submission_id, assignment_id=None, text_content=None, file_url=Non
 
                         # Filter results to same assignment; exclude self; dedupe by best score
                         best_by_sid: dict[str, float] = {}
+                        current_student = get_student_for_submission(submission_id)
+                        skipped_same_student = 0
+                        skipped_missing = 0
                         filtered = 0
                         for dist, idx in zip(D[0], I[0]):
                             if idx >= len(vi.meta):
@@ -346,12 +408,22 @@ def run_check(submission_id, assignment_id=None, text_content=None, file_url=Non
                             if sid == submission_id:
                                 # exclude self-match
                                 continue
+                            # Skip if submission row is deleted
+                            if not submission_exists(sid):
+                                skipped_missing += 1
+                                continue
                             cand_assign = meta.get("assignment_id")
                             if assignment_id:
                                 if not cand_assign:
                                     cand_assign = get_assignment_for_submission(sid)
                                 if cand_assign != assignment_id:
                                     filtered += 1
+                                    continue
+                            # Skip comparisons against the same student's prior submissions
+                            if current_student is not None:
+                                cand_student = get_student_for_submission(sid)
+                                if cand_student is not None and cand_student == current_student:
+                                    skipped_same_student += 1
                                     continue
                             # Robust similarity from L2 distance
                             try:
@@ -362,7 +434,7 @@ def run_check(submission_id, assignment_id=None, text_content=None, file_url=Non
                                 best_by_sid[sid] = sim
                         # Keep top by score after filtering
                         candidates = sorted(({"submission_id": s, "score": sc} for s, sc in best_by_sid.items()), key=lambda x: x["score"], reverse=True)[:top_k]
-                        _debug("FAISS candidates after filtering (same assignment, no self): {} ({} filtered out)", len(candidates), filtered)
+                        _debug("FAISS candidates after filtering (same assignment, no self): {} ({} filtered out, {} same-student skipped, {} missing)", len(candidates), filtered, skipped_same_student, skipped_missing)
 
                         _debug("FAISS candidates found: {}", len(candidates))
                 else:
@@ -654,6 +726,7 @@ def generate_highlighted_pdf(file_url, submission_id=None, assignment_id=None):
                 search_k = min(search_k, total_meta)
                 D, I = vi.index.search(q, search_k)
                 best_sid = None
+                cur_student = get_student_for_submission(submission_id) if submission_id else None
                 for dist, idx in zip(D[0], I[0]):
                     if idx >= len(vi.meta):
                         continue
@@ -661,10 +734,18 @@ def generate_highlighted_pdf(file_url, submission_id=None, assignment_id=None):
                     sid = meta.get("submission_id")
                     if not sid or sid == submission_id:
                         continue
+                    # Skip if submission was deleted
+                    if not submission_exists(sid):
+                        continue
                     cand_assign = meta.get("assignment_id")
                     if not cand_assign:
                         cand_assign = get_assignment_for_submission(sid)
                     if cand_assign == assignment_id:
+                        # Avoid highlighting overlap versus the same student's prior version
+                        if cur_student is not None:
+                            cand_student = get_student_for_submission(sid)
+                            if cand_student is not None and cand_student == cur_student:
+                                continue
                         best_sid = sid
                         break
                 if best_sid:

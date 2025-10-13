@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { GradeSubmissionDialog } from "../../../../components/assignment/grade-submission-dialog"
 import { PlagiarismCheckButton } from "../../../../components/assignment/plagiarism-check-button"
+import { RejectSubmissionDialog } from "../../../../components/assignment/reject-submission-dialog"
 import { api } from "../../../../lib/axios"
 import { useToast } from "@/hooks/use-toast"
 import { Calendar, FileText, CheckCircle2, Clock, Users } from "lucide-react"
@@ -19,6 +20,8 @@ interface Submission {
   id: string
   content: string
   fileUrl?: string
+  status?: "SUBMITTED" | "REJECTED" | "GRADED"
+  rejectionNote?: string | null
   report?: {
     similarity: number
     aiProbability?: number
@@ -150,10 +153,12 @@ export default function SubmissionsPage() {
   }
 
   const submissions = assignment.submissions || []
-  const gradedCount = submissions.filter(
+  // Hide rejected items from this page; they are shown on the dedicated Rejected page
+  const visibleSubmissions = submissions.filter((s) => s.status !== "REJECTED")
+  const gradedCount = visibleSubmissions.filter(
     (s) => s.grade !== undefined && s.grade !== null
   ).length
-  const submittedCount = submissions.length
+  const submittedCount = visibleSubmissions.length
 
   return (
     <div className="min-h-screen bg-background">
@@ -201,14 +206,19 @@ export default function SubmissionsPage() {
           </Card>
 
           <div>
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center justify-between mb-4 gap-2">
               <h2 className="text-xl font-semibold">Student Submissions</h2>
-              <Button size="sm" variant="outline" onClick={handleRefresh}>
-                Refresh
-              </Button>
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={() => router.push(`/assignment/${assignment.id}/rejected`)}>
+                  View Rejected
+                </Button>
+                <Button size="sm" variant="outline" onClick={handleRefresh}>
+                  Refresh
+                </Button>
+              </div>
             </div>
 
-            {submissions.length === 0 ? (
+            {visibleSubmissions.length === 0 ? (
               <Card className="bg-card/50 backdrop-blur-sm">
                 <CardContent className="py-16 text-center">
                   <div className="inline-flex h-16 w-16 items-center justify-center rounded-full bg-muted mb-4">
@@ -222,7 +232,7 @@ export default function SubmissionsPage() {
               </Card>
             ) : (
               <div className="grid gap-4">
-                {submissions.map((submission) => (
+                {visibleSubmissions.map((submission) => (
                   <Card
                     key={submission.id}
                     className="bg-card/50 backdrop-blur-sm"
@@ -242,6 +252,9 @@ export default function SubmissionsPage() {
                             <CardDescription>
                               {submission.student.email}
                             </CardDescription>
+                            {submission.status === "REJECTED" && submission.rejectionNote && (
+                              <div className="text-sm mt-2"><span className="font-medium">Note:</span> {submission.rejectionNote}</div>
+                            )}
                             {submission.fileUrl && (
                               <a
                                 href={submission.fileUrl}
@@ -257,7 +270,9 @@ export default function SubmissionsPage() {
                         </div>
 
                         <div className="flex flex-col items-end gap-2 shrink-0">
-                          {submission.grade !== undefined &&
+                          {submission.status === "REJECTED" ? (
+                            <Badge variant="destructive">Rejected</Badge>
+                          ) : submission.grade !== undefined &&
                           submission.grade !== null ? (
                             <Badge className="gap-1">
                               <CheckCircle2 className="h-3 w-3" />
@@ -292,6 +307,7 @@ export default function SubmissionsPage() {
                             ? "Edit Grade"
                             : "Grade"}
                         </Button>
+                        <RejectSubmissionDialog submissionId={submission.id} onRejected={fetchAssignmentData} />
                       </div>
                     </CardContent>
                   </Card>

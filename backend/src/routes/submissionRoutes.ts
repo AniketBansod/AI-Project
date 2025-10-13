@@ -49,5 +49,19 @@ router.post(
   isTeacher,
   submissionController.gradeSubmission
 );
+
+router.post(
+  "/:submissionId/reject",
+  authMiddleware,
+  isTeacher,
+  submissionController.rejectSubmission
+);
+
+router.delete(
+  "/:assignmentId",
+  authMiddleware,
+  isStudent,
+  submissionController.unsubmitSubmission
+);
 export default router;
 

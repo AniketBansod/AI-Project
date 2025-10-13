@@ -14,6 +14,7 @@ import commentRoutes from "./src/routes/commentRoutes";
 import submissionCommentRoutes from "./src/routes/submissionCommentRoutes"; // 1. Import
 import plagiarismReportRoutes from "./src/routes/plagiarismReportRoutes";
 import profileRoutes from "./src/routes/profileRoutes";
+import materialRoutes from "./src/routes/materialRoutes";
 
 import prisma from './src/utils/prisma';
 
@@ -53,6 +54,7 @@ app.use("/api/submissions", submissionRoutes);
 app.use("/api/submission-comments", submissionCommentRoutes); 
 app.use("/api/plagiarism-reports", plagiarismReportRoutes);
 app.use("/api/profile", profileRoutes);
+app.use("/api", materialRoutes);
 
 // app.use("/api/assignments", assignmentRoutes);
 // app.use("/api/submissions", submissionRoutes); // 2. Add this line
