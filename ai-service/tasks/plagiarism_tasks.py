@@ -319,34 +319,41 @@ def run_check(submission_id, assignment_id=None, text_content=None, file_url=Non
                 if getattr(vi, "index", None) is not None and getattr(vi, "meta", None):
                     _debug("✅ FAISS index loaded with {} meta entries", len(vi.meta))
 
-                    # Pre-filter: if assignment_id is provided, ensure there are entries for this assignment
-                    skip_faiss = False
-                    if assignment_id:
-                        # Tiny in-process cache to count entries per assignment
-                        key = ("assign_count", assignment_id)
-                        cnt = _small_cache.get(key)
-                        # IMPORTANT: Don't trust cached zero; recompute to avoid stale 0 after incremental add
-                        if cnt is None or cnt == 0:
-                            try:
-                                cnt = sum(1 for m in (vi.meta or []) if (m or {}).get("assignment_id") == assignment_id)
-                            except Exception:
-                                cnt = 0
-                            # Only cache positive counts; avoid caching zero to prevent stale skips
-                            if cnt > 0:
-                                _small_cache.set(key, cnt)
-                        if cnt == 0:
-                            _debug("No entries for assignment {} in FAISS meta; skipping search.", assignment_id)
-                            candidates = []
-                            skip_faiss = True  # cleanly skip without raising
-
-                    if not skip_faiss:
+                    # We no longer skip FAISS search when per-assignment count is zero.
+                    # Always search globally and filter to assignment using metadata or DB lookup below.
+                    if True:
                         import numpy as np
 
-                        # 🧩 Encode and normalize embedding
-                        q_emb = vi.encode([text])
+                        # 🧩 Encode the query using the same chunking scheme as the index for better recall
+                        def _chunk_text(t: str, size_w: int, overlap_w: int):
+                            key = ("chunks_q", hash(t), size_w, overlap_w)
+                            cached = _small_cache.get(key)
+                            if cached is not None:
+                                return cached
+                            words = (t or "").split()
+                            chunks = []
+                            i = 0
+                            n = len(words)
+                            while i < n:
+                                chunk = " ".join(words[i:i+size_w])
+                                if chunk.strip():
+                                    chunks.append(chunk)
+                                if i + size_w >= n:
+                                    break
+                                i += max(1, size_w - overlap_w)
+                            _small_cache.set(key, chunks)
+                            return chunks
+
+                        size_w = int(os.getenv("CHUNK_SIZE_WORDS", "250") or 250)
+                        overlap_w = int(os.getenv("CHUNK_OVERLAP_WORDS", "50") or 50)
+                        max_q_chunks = int(os.getenv("MAX_QUERY_CHUNKS", "40") or 40)
+                        q_chunks = _chunk_text(text, size_w, overlap_w)[:max_q_chunks]
+                        if not q_chunks:
+                            q_chunks = [text]
+
+                        q_emb = vi.encode(q_chunks)
                         if q_emb.ndim == 1:
                             q_emb = np.expand_dims(q_emb, axis=0)
-
                         q_emb = q_emb.astype("float32")
                         try:
                             if faiss is not None:
@@ -356,7 +363,7 @@ def run_check(submission_id, assignment_id=None, text_content=None, file_url=Non
                         except Exception as ne:
                             _debug("Normalization failed: {}", ne)
 
-                        _debug("Encoded query shape {} dtype={}", q_emb.shape, q_emb.dtype)
+                        _debug("Encoded query chunks: {} shape {} dtype={}", len(q_chunks), q_emb.shape, q_emb.dtype)
 
                         # Ensure query embedding dimension matches the FAISS index dimension
                         try:
@@ -389,49 +396,48 @@ def run_check(submission_id, assignment_id=None, text_content=None, file_url=Non
                                     assign_cnt = sum(1 for m in (vi.meta or []) if (m or {}).get("assignment_id") == assignment_id)
                                 except Exception:
                                     assign_cnt = 0
-                        search_k = max(top_k * 50, 200, assign_cnt * 50)
+                        # Use a larger candidate pool to improve recall for near-duplicates
+                        search_k = max(top_k * 100, 500, assign_cnt * 50)
                         search_k = min(search_k, total_meta)
-                        D, I = vi.index.search(q_emb, search_k)
-                        _debug("FAISS search results: D={}, I={}", D.tolist(), I.tolist())
-
-                        # Filter results to same assignment; exclude self; dedupe by best score
+                        # Accumulate results across all query chunks, keeping the best hit per submission
                         best_by_sid: dict[str, float] = {}
                         current_student = get_student_for_submission(submission_id)
                         skipped_same_student = 0
                         skipped_missing = 0
                         filtered = 0
-                        for dist, idx in zip(D[0], I[0]):
-                            if idx >= len(vi.meta):
-                                continue
-                            meta = vi.meta[idx] or {}
-                            sid = meta.get("submission_id", f"id_{idx}")
-                            if sid == submission_id:
-                                # exclude self-match
-                                continue
-                            # Skip if submission row is deleted
-                            if not submission_exists(sid):
-                                skipped_missing += 1
-                                continue
-                            cand_assign = meta.get("assignment_id")
-                            if assignment_id:
-                                if not cand_assign:
-                                    cand_assign = get_assignment_for_submission(sid)
-                                if cand_assign != assignment_id:
-                                    filtered += 1
+                        # Perform batched search for all query chunks
+                        D, I = vi.index.search(q_emb, search_k)
+                        # Iterate across all chunk rows
+                        for row_d, row_i in zip(D, I):
+                            for dist, idx in zip(row_d, row_i):
+                                if idx >= len(vi.meta):
                                     continue
-                            # Skip comparisons against the same student's prior submissions
-                            if current_student is not None:
-                                cand_student = get_student_for_submission(sid)
-                                if cand_student is not None and cand_student == current_student:
-                                    skipped_same_student += 1
+                                meta = vi.meta[idx] or {}
+                                sid = meta.get("submission_id", f"id_{idx}")
+                                if sid == submission_id:
                                     continue
-                            # Robust similarity from L2 distance
-                            try:
-                                sim = 1.0 / (1.0 + float(dist))
-                            except Exception:
-                                sim = 0.0
-                            if sid not in best_by_sid or sim > best_by_sid[sid]:
-                                best_by_sid[sid] = sim
+                                if not submission_exists(sid):
+                                    skipped_missing += 1
+                                    continue
+                                cand_assign = meta.get("assignment_id")
+                                if assignment_id:
+                                    if not cand_assign:
+                                        cand_assign = get_assignment_for_submission(sid)
+                                    if cand_assign != assignment_id:
+                                        filtered += 1
+                                        continue
+                                # Keep cross-student matches; only skip same-student
+                                if current_student is not None:
+                                    cand_student = get_student_for_submission(sid)
+                                    if cand_student is not None and cand_student == current_student:
+                                        skipped_same_student += 1
+                                        continue
+                                try:
+                                    sim = 1.0 / (1.0 + float(dist))
+                                except Exception:
+                                    sim = 0.0
+                                if sid not in best_by_sid or sim > best_by_sid[sid]:
+                                    best_by_sid[sid] = sim
                         # Keep top by score after filtering
                         candidates = sorted(({"submission_id": s, "score": sc} for s, sc in best_by_sid.items()), key=lambda x: x["score"], reverse=True)[:top_k]
                         _debug("FAISS candidates after filtering (same assignment, no self): {} ({} filtered out, {} same-student skipped, {} missing)", len(candidates), filtered, skipped_same_student, skipped_missing)
