@@ -17,7 +17,7 @@ FROM node:20-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 # Prisma needs OpenSSL and certs
-RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 # Copy node_modules from base for production deps
 COPY --from=base /app/node_modules ./node_modules
