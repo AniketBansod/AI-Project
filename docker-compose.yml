@@ -13,6 +13,9 @@ services:
   api:
     image: ghcr.io/aniketbansod/ai-project-backend:prod-latest
     env_file: backend.env
+    environment:
+      # Ensure internal service-to-service calls target the AI container over the Docker network
+      - AI_SERVICE_URL=http://ai:8000
     depends_on:
       - ai
     restart: unless-stopped
@@ -25,6 +28,11 @@ services:
   worker:
     image: ghcr.io/aniketbansod/ai-project-worker:prod-latest
     env_file: backend.env
+    environment:
+      # Ensure internal service-to-service calls target the AI container over the Docker network
+      - AI_SERVICE_URL=http://ai:8000
+    # Make sure the worker container runs the BullMQ worker process, not the API server
+    command: ["npm", "run", "start:worker"]
     depends_on:
       - api
       - ai
