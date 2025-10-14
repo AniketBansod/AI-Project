@@ -39,7 +39,13 @@ async def health():
 @app.get("/ready")
 async def ready():
     # Simple readiness probe; extend with model/cache checks if needed
-    return {"status": "ready"}
+    # Report a few key env toggles for diagnostics (non-secret)
+    return {
+        "status": "ready",
+        "exclude_same_student": os.getenv("EXCLUDE_SAME_STUDENT_MATCHES", "false"),
+        "faiss_index_path": os.getenv("FAISS_INDEX_PATH", "/app/data/faiss_index.bin"),
+        "faiss_meta_path": os.getenv("FAISS_META_PATH", "/app/data/faiss_meta.pkl"),
+    }
 
 
 # ---------------------------

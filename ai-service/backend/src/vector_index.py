@@ -16,9 +16,9 @@ load_dotenv()
 
 class VectorIndex:
     def __init__(self, index_path=None, meta_path=None, model_name=None):
-        # Use env vars if not explicitly passed
-        self.index_path = index_path or os.getenv("FAISS_INDEX_PATH", "backend/src/faiss_index.bin")
-        self.meta_path = meta_path or os.getenv("FAISS_META_PATH", "backend/src/faiss_meta.pkl")
+        # Use env vars if not explicitly passed; default to /app/data so docker volume can persist data without hiding code
+        self.index_path = index_path or os.getenv("FAISS_INDEX_PATH", "/app/data/faiss_index.bin")
+        self.meta_path = meta_path or os.getenv("FAISS_META_PATH", "/app/data/faiss_meta.pkl")
         self.model_name = model_name or os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
         self.index = None
@@ -148,6 +148,12 @@ class VectorIndex:
 
     def save(self):
         """Save index + metadata to disk."""
+        # Ensure target directory exists
+        try:
+            os.makedirs(os.path.dirname(self.index_path), exist_ok=True)
+            os.makedirs(os.path.dirname(self.meta_path), exist_ok=True)
+        except Exception:
+            pass
         faiss.write_index(self.index, self.index_path)
         with open(self.meta_path, "wb") as f:
             pickle.dump(self.meta, f)
@@ -199,10 +205,32 @@ class VectorIndex:
 _vector_index_instance = None
 
 def get_vector_index():
-    """Load a single global FAISS index instance (used by plagiarism_tasks)."""
+    """Load a single global FAISS index instance (used by plagiarism_tasks).
+    If no index is present on disk yet, initialize an empty one with the correct
+    embedding dimension so incremental indexing can proceed on first submission.
+    """
     global _vector_index_instance
     if _vector_index_instance is None:
         vi = VectorIndex()
-        vi.load()
+        try:
+            vi.load()
+        except FileNotFoundError:
+            # No saved index yet — create an empty one with the model's embedding dimension
+            if faiss is None:
+                raise ImportError("faiss-cpu is required to initialize the vector index.")
+            # Lazily instantiate model and infer dimension
+            from sentence_transformers import SentenceTransformer
+            model = SentenceTransformer(vi.model_name)
+            dummy = model.encode(["init"], convert_to_numpy=True, show_progress_bar=False)
+            if dummy.ndim == 1:
+                import numpy as _np
+                dummy = _np.expand_dims(dummy, axis=0)
+            dim = int(dummy.shape[1])
+            vi.model = model
+            vi.index = faiss.IndexFlatL2(dim)
+            vi.meta = []
+            # Persist empty index and meta so subsequent loads succeed
+            vi.save()
+            print(f"🆕 Initialized empty FAISS index (dim={dim}) at {vi.index_path}")
         _vector_index_instance = vi
     return _vector_index_instance

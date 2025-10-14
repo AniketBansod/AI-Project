@@ -41,6 +41,9 @@ services:
   ai:
     image: ghcr.io/aniketbansod/ai-service:prod-latest
     env_file: ai.env
+    environment:
+      - FAISS_INDEX_PATH=/app/data/faiss_index.bin
+      - FAISS_META_PATH=/app/data/faiss_meta.pkl
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -48,7 +51,7 @@ services:
       timeout: 5s
       retries: 3
     volumes:
-      - ai_index:/app/backend/src
+      - ai_index:/app/data
       - hf_cache:/root/.cache/huggingface
 
 volumes:
