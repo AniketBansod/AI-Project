@@ -5,19 +5,55 @@
 
 api.4.187.225.54.nip.io {
 	encode zstd gzip
-	# NOTE: CORS is now handled exclusively by the upstream Express server.
-	# Removing proxy-level injection prevents duplicate Access-Control-Allow-Origin
-	# headers (browser rejects multiple values). If you need edge-level CORS later,
-	# add headers here AND strip upstream ones via `header_down -Access-Control-*`.
+	# Centralized CORS handling at edge (Caddy). We STRIP any upstream CORS headers
+	# to prevent duplication and set a single consistent set here.
+
+	# Define matcher for API + auth routes we proxy to Node backend
 	@api {
 		path /health*
 		path /ready*
 		path /api/*
 		path /auth/*
 	}
+
+	# Preflight (OPTIONS) requests must be answered quickly without hitting upstream
+	@preflight {
+		method OPTIONS
+		header Origin *
+		path /api/* /auth/*
+	}
+	respond @preflight 204 {
+		headers {
+			Access-Control-Allow-Origin "https://ai-project-ten-lilac.vercel.app"
+			Access-Control-Allow-Credentials "true"
+			Access-Control-Allow-Methods "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+			Access-Control-Allow-Headers "Authorization, Content-Type, Accept, X-Requested-With"
+			Vary "Origin"
+		}
+	}
+
+	# Proxy actual API/auth traffic; strip any CORS headers coming back
 	reverse_proxy @api api:5000 {
 		header_up X-Forwarded-Proto {scheme}
 		header_up X-Forwarded-For {remote}
+		header_down -Access-Control-Allow-Origin
+		header_down -Access-Control-Allow-Credentials
+		header_down -Access-Control-Allow-Methods
+		header_down -Access-Control-Allow-Headers
+		header_down -Vary
+	}
+
+	# Inject single authoritative CORS headers on all API/auth responses (non-preflight)
+	@apiCors {
+		header Origin *
+		path /api/* /auth/*
+	}
+	header @apiCors {
+		Access-Control-Allow-Origin "https://ai-project-ten-lilac.vercel.app"
+		Access-Control-Allow-Credentials "true"
+		Access-Control-Allow-Methods "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+		Access-Control-Allow-Headers "Authorization, Content-Type, Accept, X-Requested-With"
+		Vary "Origin"
 	}
 
 	# Pass everything else to AI service if needed (optional endpoint base)
