@@ -12,7 +12,7 @@ const geistSans = GeistSans.variable
 const geistMono = GeistMono.variable
 
 export const metadata: Metadata = {
-  title: "v0 App",
+  title: "AI-Powered Classroom",
   description: "Created with v0",
   generator: "v0.app",
 }
