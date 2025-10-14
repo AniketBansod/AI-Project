@@ -101,6 +101,7 @@ jobs:
             mkdir -p ~/app
             cd ~/app
             echo "${{ secrets.BACKEND_ENV }}" > backend.env
+            if [ -n "${{ secrets.AI_ENV }}" ]; then echo "${{ secrets.AI_ENV }}" > ai.env; fi
             echo "Logging into GHCR on remote..."
             echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
             docker compose pull

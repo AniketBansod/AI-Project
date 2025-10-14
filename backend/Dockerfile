@@ -26,5 +26,8 @@ COPY --from=build /app/dist ./dist
 COPY package.json ./
 COPY prisma ./prisma
 
+# Generate Prisma Client in the runtime image
+RUN npx prisma generate
+
 EXPOSE 5000
 CMD ["npm", "run", "start"]
