@@ -27,4 +27,4 @@ COPY package.json ./
 COPY prisma ./prisma
 
 EXPOSE 5000
-CMD ["sh", "-lc", "npm run migrate:deploy && npm run start"]
+CMD ["npm", "run", "start"]
