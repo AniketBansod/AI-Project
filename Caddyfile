@@ -5,21 +5,10 @@
 
 api.4.187.225.54.nip.io {
 	encode zstd gzip
-	# CORS at proxy layer (reflect origin) to satisfy preflight if backend isn't reached
-	@hasOrigin header Origin *
-	header @hasOrigin {
-		Access-Control-Allow-Origin "{http.request.header.Origin}"
-		Access-Control-Allow-Credentials "true"
-		Access-Control-Allow-Headers "Authorization, Content-Type"
-		Access-Control-Allow-Methods "GET,POST,PUT,PATCH,DELETE,OPTIONS"
-		Vary "Origin"
-	}
-
-	@preflight {
-		method OPTIONS
-		header Origin *
-	}
-	respond @preflight 204
+	# NOTE: CORS is now handled exclusively by the upstream Express server.
+	# Removing proxy-level injection prevents duplicate Access-Control-Allow-Origin
+	# headers (browser rejects multiple values). If you need edge-level CORS later,
+	# add headers here AND strip upstream ones via `header_down -Access-Control-*`.
 	@api {
 		path /health*
 		path /ready*
