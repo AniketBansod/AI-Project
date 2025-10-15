@@ -133,7 +133,7 @@ export const downloadHighlightedPdf = async (req: Request, res: Response) => {
     try {
       const aiResp = await axios.post(
         `${AI_SERVICE_URL}/highlight_pdf`,
-        { file_url: submission.fileUrl, submission_id: submission.id },
+        { file_url: submission.fileUrl, submission_id: submission.id, assignment_id: submission.assignmentId },
         { responseType: "stream", timeout: 10 * 60 * 1000 }
       );
 

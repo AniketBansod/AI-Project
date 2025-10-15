@@ -16,8 +16,11 @@ services:
     environment:
       # Ensure internal service-to-service calls target the AI container over the Docker network
       - AI_SERVICE_URL=http://ai:8000
+      # Queue and caches: use in-cluster Redis
+      - REDIS_URL=redis://redis:6379
     depends_on:
       - ai
+      - redis
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
@@ -31,11 +34,14 @@ services:
     environment:
       # Ensure internal service-to-service calls target the AI container over the Docker network
       - AI_SERVICE_URL=http://ai:8000
+      # Queue and caches: use in-cluster Redis
+      - REDIS_URL=redis://redis:6379
     # Make sure the worker container runs the BullMQ worker process, not the API server
     command: ["npm", "run", "start:worker"]
     depends_on:
       - api
       - ai
+      - redis
     restart: unless-stopped
 
   ai:
@@ -44,6 +50,8 @@ services:
     environment:
       - FAISS_INDEX_PATH=/app/data/faiss_index.bin
       - FAISS_META_PATH=/app/data/faiss_meta.pkl
+      # Use Redis for caching detectors/BM25 if available
+      - REDIS_URL=redis://redis:6379
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -53,6 +61,16 @@ services:
     volumes:
       - ai_index:/app/data
       - hf_cache:/root/.cache/huggingface
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
 volumes:
   ai_index:
