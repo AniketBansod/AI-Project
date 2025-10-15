@@ -5,10 +5,10 @@
 
 api.4.187.225.54.nip.io {
 	encode zstd gzip
-	# Centralized CORS handling at edge (Caddy). We STRIP any upstream CORS headers
-	# to prevent duplication and set a single consistent set here.
 
-	# Define matcher for API + auth routes we proxy to Node backend
+	# --- CORS HANDLING ---
+
+	# Define matcher for API + auth routes
 	@api {
 		path /health*
 		path /ready*
@@ -16,23 +16,26 @@ api.4.187.225.54.nip.io {
 		path /auth/*
 	}
 
-	# Preflight (OPTIONS) requests must be answered quickly without hitting upstream
+	# Handle preflight (OPTIONS) requests locally
 	@preflight {
 		method OPTIONS
 		header Origin *
 		path /api/* /auth/*
 	}
-	respond @preflight 204 {
-		headers {
-			Access-Control-Allow-Origin "https://ai-project-ten-lilac.vercel.app"
-			Access-Control-Allow-Credentials "true"
-			Access-Control-Allow-Methods "GET,POST,PUT,PATCH,DELETE,OPTIONS"
-			Access-Control-Allow-Headers "Authorization, Content-Type, Accept, X-Requested-With"
-			Vary "Origin"
-		}
+
+	# Respond 204 (no content) for preflight
+	respond @preflight 204
+
+	# Add the CORS headers for preflight responses
+	header @preflight {
+		Access-Control-Allow-Origin "https://ai-project-ten-lilac.vercel.app"
+		Access-Control-Allow-Credentials "true"
+		Access-Control-Allow-Methods "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+		Access-Control-Allow-Headers "Authorization, Content-Type, Accept, X-Requested-With"
+		Vary "Origin"
 	}
 
-	# Proxy actual API/auth traffic; strip any CORS headers coming back
+	# Proxy API/auth traffic
 	reverse_proxy @api api:5000 {
 		header_up X-Forwarded-Proto {scheme}
 		header_up X-Forwarded-For {remote}
@@ -43,7 +46,7 @@ api.4.187.225.54.nip.io {
 		header_down -Vary
 	}
 
-	# Inject single authoritative CORS headers on all API/auth responses (non-preflight)
+	# Inject unified CORS headers for API/auth responses
 	@apiCors {
 		header Origin *
 		path /api/* /auth/*
@@ -56,14 +59,14 @@ api.4.187.225.54.nip.io {
 		Vary "Origin"
 	}
 
-	# Pass everything else to AI service if needed (optional endpoint base)
+	# --- AI SERVICE ROUTES ---
 	@ai {
 		path /check
 		path /highlight_pdf
 	}
 	reverse_proxy @ai ai:8000
 
-	# Basic security headers (Caddy v2 directive is 'header')
+	# --- SECURITY HEADERS ---
 	header {
 		X-Frame-Options "DENY"
 		X-Content-Type-Options "nosniff"
