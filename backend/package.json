@@ -9,7 +9,9 @@
     "start:worker": "node dist/src/worker.js",
     "migrate:deploy": "prisma migrate deploy",
     "generate": "prisma generate",
-    "worker": "ts-node src/worker.ts"
+    "worker": "ts-node src/worker.ts",
+    "audit:prod": "npm audit --production",
+    "metrics:audit": "npm audit --production > ../evidence/backend/npm-audit-backend.txt || exit 0"
   },
   "keywords": [],
   "author": "",

@@ -20,9 +20,10 @@ RUN python -m pip install --upgrade pip setuptools wheel
 RUN python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.5.0
 
 # ✅ Preinstall heavy binary-only wheels to avoid source compilation
+# NOTE: Use NumPy 1.x because FAISS wheels in our environment are built against NumPy 1 API
 RUN python -m pip install --only-binary=:all: \
     faiss-cpu==1.8.0 \
-    numpy==2.3.3 \
+    numpy==1.26.4 \
     scipy==1.16.2 \
     scikit-learn==1.7.2 \
     PyMuPDF==1.26.4 \

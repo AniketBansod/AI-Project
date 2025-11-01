@@ -1,0 +1,5 @@
+{
+  "prompt": "Example prompt to test your AI endpoint",
+  "maxTokens": 128,
+  "temperature": 0.7
+}
