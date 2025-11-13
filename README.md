@@ -17,6 +17,10 @@ AI-powered classroom platform with Next.js, Node/Express API, and a FastAPI micr
 ![Caddy](https://img.shields.io/badge/Caddy-Reverse%20Proxy-2aa3ff)
 ![License](https://img.shields.io/badge/License-ISC-blue)
 
+<p align="center">
+	<img src="docs/AI-Powered-Classroom-ss.png" alt="AI-Powered Classroom – dashboard screenshot" width="900" />
+</p>
+
 ## 🚀 Features
 
 - Robust classroom workflows: classes, assignments, submissions, comments, grades, materials.
