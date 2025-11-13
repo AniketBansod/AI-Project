@@ -318,7 +318,7 @@ docker-compose.yml    # Multi-service deployment
 
 ## 📝 License
 
-Licensed under the ISC License. If you prefer MIT for the overall repository, let me know and I can add a `LICENSE` file.
+Licensed under the ISC License. See `LICENSE` for full text.
 
 ## 🙌 Acknowledgements
 
