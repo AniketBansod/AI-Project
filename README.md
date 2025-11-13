@@ -21,6 +21,10 @@ AI-powered classroom platform with Next.js, Node/Express API, and a FastAPI micr
 	<img src="docs/AI-Powered-Classroom-ss.png" alt="AI-Powered Classroom – dashboard screenshot" width="900" />
 </p>
 
+<p align="center">
+	<strong>Live Demo:</strong> <a href="https://ai-project-ten-lilac.vercel.app/" target="_blank">https://ai-project-ten-lilac.vercel.app/</a>
+</p>
+
 ## 🚀 Features
 
 - Robust classroom workflows: classes, assignments, submissions, comments, grades, materials.
